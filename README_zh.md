@@ -30,15 +30,7 @@ AI 模型总是解析到错误的地方，它到传统的云解析 DNS 那边解
 
 - https://github.com/acmesh-official/acme.sh
 
-本技能要求 `acme.sh` 已经存在于 `~/.acme.sh/acme.sh`，或者可以从 `PATH` 找到。
-
-## Python 依赖
-
-脚本不会自动安装依赖，请先手动安装：
-
-```bash
-python3 -m pip install --user aliyun-python-sdk-core
-```
+本技能要求 `acme.sh` 可从 `PATH` 找到；脚本也兼容直接从 `~/.acme.sh/acme.sh` 位置查找。
 
 ## 快速开始
 
@@ -48,6 +40,14 @@ python3 -m pip install --user aliyun-python-sdk-core
 export ALIYUN_AK='你的AK'
 export ALIYUN_SK='你的SK'
 export ALIYUN_SECURITY_TOKEN='YOUR_STS_TOKEN'  # 可选，推荐 STS 临时凭证
+```
+
+脚本也兼容 Alibaba Cloud 风格的变量名：
+
+```bash
+export ALIBABACLOUD_ACCESS_KEY_ID='你的AK'
+export ALIBABACLOUD_ACCESS_KEY_SECRET='你的SK'
+export ALIBABACLOUD_SECURITY_TOKEN='YOUR_STS_TOKEN'  # 可选
 ```
 
 ### 2) 单域名

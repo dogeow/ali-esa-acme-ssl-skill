@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import argparse
-import importlib.util
+import base64
+import datetime
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -9,12 +12,19 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 
 
 
 DEFAULT_CMD_TIMEOUT = 300
 DIG_CMD_TIMEOUT = 20
 ACME_CMD_TIMEOUT_PADDING = 900
+AK_ENV_NAMES = ("ALIYUN_AK", "ALIBABACLOUD_ACCESS_KEY_ID")
+SK_ENV_NAMES = ("ALIYUN_SK", "ALIBABACLOUD_ACCESS_KEY_SECRET")
+STS_ENV_NAMES = ("ALIYUN_SECURITY_TOKEN", "ALIBABACLOUD_SECURITY_TOKEN")
 
 
 def run(cmd, timeout=DEFAULT_CMD_TIMEOUT):
@@ -39,6 +49,14 @@ def redact_text(text, secrets=None):
     # basic AccessKeyId pattern mask
     out = re.sub(r"LTAI[0-9A-Za-z]{12,}", "LTAI***REDACTED***", out)
     return out
+
+
+def first_env(*names):
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
 
 
 def is_valid_host(host):
@@ -137,6 +155,18 @@ _REGION = None  # must be auto-detected before use
 _DEFAULT_SEED_REGION = "cn-hangzhou"
 
 
+def _percent_encode(value):
+    return urllib.parse.quote(str(value), safe="~")
+
+
+def _encode_params(params):
+    return "&".join(f"{_percent_encode(k)}={_percent_encode(v)}" for k, v in params.items())
+
+
+def _iso8601_timestamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _discover_esa_regions(client):
     """Dynamically discover all ESA-supported regions via DescribeRegions API."""
     try:
@@ -154,21 +184,57 @@ def _discover_esa_regions(client):
 
 
 def esa_req(client, action, method="POST", region=None, **params):
-    from aliyunsdkcore.request import CommonRequest
     effective_region = region or _REGION
     if not effective_region:
         print("[ERR] ESA region not detected. Cannot make API request.")
         sys.exit(2)
-    req = CommonRequest()
-    req.set_accept_format("json")
-    req.set_domain(f"esa.{effective_region}.aliyuncs.com")
-    req.set_version(ESA_API_VERSION)
-    req.set_action_name(action)
-    req.set_method(method)
-    req.set_protocol_type("https")
+    query_params = {
+        "AccessKeyId": client["ak"],
+        "Action": action,
+        "Format": "JSON",
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": str(uuid.uuid4()),
+        "SignatureVersion": "1.0",
+        "Timestamp": _iso8601_timestamp(),
+        "Version": ESA_API_VERSION,
+    }
+    if client.get("sts_token"):
+        query_params["SecurityToken"] = client["sts_token"]
     for k, v in params.items():
-        req.add_query_param(k, str(v))
-    return json.loads(client.do_action_with_exception(req).decode())
+        query_params[k] = str(v)
+
+    canonicalized_query = _encode_params(dict(sorted(query_params.items())))
+    string_to_sign = f"{method.upper()}&%2F&{_percent_encode(canonicalized_query)}"
+    signature = base64.b64encode(
+        hmac.new(
+            f"{client['sk']}&".encode("utf-8"),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha1,
+        ).digest()
+    ).decode("utf-8")
+    query_params["Signature"] = signature
+    payload = _encode_params(dict(sorted(query_params.items()))).encode("utf-8")
+
+    url = f"https://esa.{effective_region}.aliyuncs.com/"
+    data = None if method.upper() == "GET" else payload
+    if method.upper() == "GET":
+        url = f"{url}?{payload.decode('utf-8')}"
+    req = urllib.request.Request(url, data=data, method=method.upper())
+    req.add_header("Accept", "application/json")
+    if data is not None:
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"ESA API HTTP {e.code}: {body}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"ESA API request failed: {e}") from e
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"ESA API returned non-JSON response: {body}") from e
 
 
 def parse_challenges(output):
@@ -296,13 +362,7 @@ def auto_site_id(client, base_domain):
 
 
 def ensure_python_deps():
-    needed = ["aliyunsdkcore"]
-    missing = [m for m in needed if importlib.util.find_spec(m) is None]
-    if not missing:
-        return
-    print("[ERR] missing python deps: aliyun-python-sdk-core")
-    print("[ERR] install it manually first: python3 -m pip install --user aliyun-python-sdk-core")
-    sys.exit(2)
+    return
 
 
 def find_acme_sh():
@@ -343,19 +403,12 @@ def print_security_reminders(has_sts_token, lang="en"):
 
 
 def make_acs_client(ak, sk, region, sts_token=None):
-    from aliyunsdkcore.client import AcsClient
-
-    if sts_token:
-        try:
-            from aliyunsdkcore.auth.credentials import StsTokenCredential
-            credentials = StsTokenCredential(ak, sk, sts_token)
-            return AcsClient(region_id=region, credential=credentials)
-        except Exception:
-            try:
-                return AcsClient(ak, sk, region, security_token=sts_token)
-            except TypeError:
-                pass
-    return AcsClient(ak, sk, region)
+    return {
+        "ak": ak,
+        "sk": sk,
+        "region": region,
+        "sts_token": sts_token,
+    }
 
 
 def ensure_parent_dirs(paths):
@@ -407,11 +460,11 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="Issue cert via acme.sh + ESA DNS TXT automation (supports wildcard)")
     parser.add_argument("-d", "--domain", action="append", required=True, help="can repeat, e.g. -d example.com -d '*.example.com'")
     parser.add_argument("--site-id", required=False, help="ESA site id (optional; auto-detect by domain if omitted)")
-    parser.add_argument("--ak", default=os.getenv("ALIYUN_AK"))
-    parser.add_argument("--sk", default=os.getenv("ALIYUN_SK"))
+    parser.add_argument("--ak", default=first_env(*AK_ENV_NAMES))
+    parser.add_argument("--sk", default=first_env(*SK_ENV_NAMES))
     parser.add_argument(
         "--sts-token",
-        default=os.getenv("ALIYUN_SECURITY_TOKEN") or os.getenv("SECURITY_TOKEN"),
+        default=first_env(*STS_ENV_NAMES),
         help="optional STS security token; recommended for temporary credentials",
     )
     langs = available_langs()
@@ -436,7 +489,8 @@ def parse_args(argv=None):
 def validate_credentials(ak, sk):
     if ak and sk:
         return
-    print("[ERR] missing --ak/--sk (or env ALIYUN_AK/ALIYUN_SK)")
+    print("[ERR] missing --ak/--sk")
+    print("[ERR] supported env names: ALIYUN_AK/ALIYUN_SK or ALIBABACLOUD_ACCESS_KEY_ID/ALIBABACLOUD_ACCESS_KEY_SECRET")
     sys.exit(2)
 
 

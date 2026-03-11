@@ -2,7 +2,7 @@
 name: ali-esa-acme-ssl-skill
 description: Automatically issue/renew HTTPS certificates using Alibaba Cloud ESA DNS + acme.sh (including wildcard *.example.com + example.com), with optional installation to Nginx. Trigger this skill when the user mentions ESA, ATrustDNS, _acme-challenge, acme.sh, Let's Encrypt, No TXT record found, InvalidRecordNameSuffix, wildcard certificate, or Nginx certificate configuration.
 homepage: https://github.com/dogeow/ali-esa-acme-ssl-skill
-metadata: {"openclaw":{"homepage":"https://github.com/dogeow/ali-esa-acme-ssl-skill","os":["linux"],"requires":{"bins":["python3","dig"],"env":["ALIYUN_AK","ALIYUN_SK"]},"primaryEnv":"ALIYUN_AK"}}
+metadata: {"openclaw":{"homepage":"https://github.com/dogeow/ali-esa-acme-ssl-skill","os":["linux"],"requires":{"bins":["python3","dig","acme.sh"],"env":["ALIYUN_AK","ALIYUN_SK","ALIBABACLOUD_ACCESS_KEY_ID","ALIBABACLOUD_ACCESS_KEY_SECRET"]},"primaryEnv":"ALIYUN_AK"}}
 ---
 
 # ESA DNS + ACME Certificate Automation
@@ -42,18 +42,13 @@ Install `acme.sh` from the official project before using this skill, and review 
 
 - https://github.com/acmesh-official/acme.sh
 
-This skill expects `acme.sh` to already exist at `~/.acme.sh/acme.sh` or be available on `PATH`.
-
-Python dependencies (manual install required):
-
-```bash
-python3 -m pip install --user aliyun-python-sdk-core
-```
+This skill expects `acme.sh` to be available on `PATH`. The script also falls back to `~/.acme.sh/acme.sh` if present.
 
 Requirements:
 
-- AK/SK (recommended: pass via temporary environment variables)
-- STS token is supported via `ALIYUN_SECURITY_TOKEN` / `SECURITY_TOKEN` or `--sts-token`
+- Credentials via `ALIYUN_AK` / `ALIYUN_SK` or `ALIBABACLOUD_ACCESS_KEY_ID` / `ALIBABACLOUD_ACCESS_KEY_SECRET`
+- STS token is supported via `ALIYUN_SECURITY_TOKEN`, `ALIBABACLOUD_SECURITY_TOKEN`, or `--sts-token`
+- If the user provides credentials directly in OpenClaw chat/TUI as plain `id` / `secret` / `token` values without env names, treat them as generic Alibaba Cloud `AccessKeyId` / `AccessKeySecret` / `SecurityToken` and pass them to `--ak` / `--sk` / `--sts-token`. Do not block on whether the user said `Aliyun` or `Alibaba Cloud`; let the script auto-detect the ESA region/site.
 
 ---
 
@@ -78,6 +73,14 @@ export ALIYUN_SK='YOUR_SK'
 export ALIYUN_SECURITY_TOKEN='YOUR_STS_TOKEN'   # optional but recommended
 python3 scripts/esa_acme_issue.py \
   -d test.example.com
+```
+
+Equivalent Alibaba Cloud env names are also accepted:
+
+```bash
+export ALIBABACLOUD_ACCESS_KEY_ID='YOUR_AK'
+export ALIBABACLOUD_ACCESS_KEY_SECRET='YOUR_SK'
+export ALIBABACLOUD_SECURITY_TOKEN='YOUR_STS_TOKEN'   # optional
 ```
 
 ### Apex + wildcard (recommended order)

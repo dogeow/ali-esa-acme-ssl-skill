@@ -30,15 +30,7 @@ Install `acme.sh` from the official project before using this skill, and review 
 
 - https://github.com/acmesh-official/acme.sh
 
-This skill expects `acme.sh` to already exist at `~/.acme.sh/acme.sh` or be available on `PATH`.
-
-## Python dependencies
-
-The script does not auto-install dependencies. Install them manually first:
-
-```bash
-python3 -m pip install --user aliyun-python-sdk-core
-```
+This skill expects `acme.sh` to be available on `PATH`. The script also falls back to `~/.acme.sh/acme.sh` if present.
 
 ## Quick start
 
@@ -48,6 +40,14 @@ python3 -m pip install --user aliyun-python-sdk-core
 export ALIYUN_AK='YOUR_AK'
 export ALIYUN_SK='YOUR_SK'
 export ALIYUN_SECURITY_TOKEN='YOUR_STS_TOKEN'  # optional but recommended
+```
+
+The script also accepts Alibaba Cloud style aliases:
+
+```bash
+export ALIBABACLOUD_ACCESS_KEY_ID='YOUR_AK'
+export ALIBABACLOUD_ACCESS_KEY_SECRET='YOUR_SK'
+export ALIBABACLOUD_SECURITY_TOKEN='YOUR_STS_TOKEN'  # optional
 ```
 
 ### 2) Single domain

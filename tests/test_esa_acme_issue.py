@@ -1,6 +1,8 @@
 import importlib.util
+import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "esa_acme_issue.py"
@@ -99,6 +101,21 @@ class ArgParseTests(unittest.TestCase):
     def test_install_cert_flag_enables_installation(self):
         args = MODULE.parse_args(["-d", "example.com", "--install-cert"])
         self.assertTrue(args.install_cert)
+
+    def test_parse_args_supports_alibabacloud_env_aliases(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ALIBABACLOUD_ACCESS_KEY_ID": "ak",
+                "ALIBABACLOUD_ACCESS_KEY_SECRET": "sk",
+                "ALIBABACLOUD_SECURITY_TOKEN": "sts",
+            },
+            clear=False,
+        ):
+            args = MODULE.parse_args(["-d", "example.com"])
+        self.assertEqual(args.ak, "ak")
+        self.assertEqual(args.sk, "sk")
+        self.assertEqual(args.sts_token, "sts")
 
 
 class CommandTests(unittest.TestCase):
