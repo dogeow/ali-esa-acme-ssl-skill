@@ -26,12 +26,32 @@ def redact_text(text, secrets=None):
     return out
 
 
-def esa_req(client, action, method="POST", **params):
+ESA_API_VERSION = "2024-09-10"
+_REGION = None  # must be auto-detected before use
+_DEFAULT_SEED_REGION = "cn-hangzhou"
+
+
+def _discover_esa_regions(client):
+    """Dynamically discover all ESA-supported regions via DescribeRegions API."""
+    try:
+        resp = esa_req(client, "DescribeRegions", "GET", region=_DEFAULT_SEED_REGION)
+        regions = resp.get("Regions", [])
+        return [r["RegionId"] for r in regions if r.get("RegionId")]
+    except Exception:
+        # Fallback: if DescribeRegions not available, use seed region only
+        return [_DEFAULT_SEED_REGION]
+
+
+def esa_req(client, action, method="POST", region=None, **params):
     from aliyunsdkcore.request import CommonRequest
+    effective_region = region or _REGION
+    if not effective_region:
+        print("[ERR] ESA region not detected. Cannot make API request.")
+        sys.exit(2)
     req = CommonRequest()
     req.set_accept_format("json")
-    req.set_domain("esa.cn-hangzhou.aliyuncs.com")
-    req.set_version("2024-09-10")
+    req.set_domain(f"esa.{effective_region}.aliyuncs.com")
+    req.set_version(ESA_API_VERSION)
     req.set_action_name(action)
     req.set_method(method)
     req.set_protocol_type("https")
@@ -139,29 +159,56 @@ def ensure_a_record(client, site_id, zone, host, ip, dns_timeout=600, confirm_ov
     print(f"[OK] A record propagated on authoritative NS: {host} -> {ip}")
 
 
-def auto_site_id(client, base_domain):
-    # Find best matching site by suffix, prefer exact domain match
+def _list_all_sites(client, region=None):
     page = 1
-    candidates = []
+    all_sites = []
     while True:
-        resp = esa_req(client, "ListSites", "GET", PageNumber=page, PageSize=500)
+        resp = esa_req(client, "ListSites", "GET", region=region, PageNumber=page, PageSize=500)
         sites = resp.get("Sites", [])
-        for s in sites:
-            sn = (s.get("SiteName") or "").lower().strip()
-            if not sn:
-                continue
-            if base_domain == sn or base_domain.endswith("." + sn):
-                candidates.append(s)
+        all_sites.extend(sites)
         total = int(resp.get("TotalCount", 0) or 0)
         if page * 500 >= total:
             break
         page += 1
+    return all_sites
 
+
+def _match_site(sites, base_domain):
+    candidates = []
+    for s in sites:
+        sn = (s.get("SiteName") or "").lower().strip()
+        if not sn:
+            continue
+        if base_domain == sn or base_domain.endswith("." + sn):
+            candidates.append(s)
     if not candidates:
-        raise RuntimeError(f"No ESA site matched domain: {base_domain}")
-
+        return None
     candidates.sort(key=lambda s: len((s.get("SiteName") or "")), reverse=True)
-    return str(candidates[0].get("SiteId")), candidates[0].get("SiteName")
+    return candidates[0]
+
+
+def auto_detect_region(client, base_domain):
+    """Probe ESA regions to find which one hosts the target domain."""
+    regions = _discover_esa_regions(client)
+    print(f"[INFO] discovered {len(regions)} ESA region(s): {', '.join(regions)}")
+    for region in regions:
+        try:
+            sites = _list_all_sites(client, region=region)
+        except Exception:
+            continue
+        match = _match_site(sites, base_domain)
+        if match:
+            return region, str(match.get("SiteId")), match.get("SiteName")
+    return None, None, None
+
+
+def auto_site_id(client, base_domain):
+    # Find best matching site by suffix, prefer exact domain match
+    sites = _list_all_sites(client)
+    match = _match_site(sites, base_domain)
+    if not match:
+        raise RuntimeError(f"No ESA site matched domain: {base_domain}")
+    return str(match.get("SiteId")), match.get("SiteName")
 
 
 def ensure_python_deps(auto_install=True):
@@ -189,13 +236,32 @@ def find_acme_sh():
     sys.exit(2)
 
 
-def print_security_reminders(has_sts_token):
-    print("[SECURITY] 请提醒用户以下 1/2/3：")
-    print("  1) 优先使用 RAM 子账号最小权限，不要使用主账号长期 AK。")
-    print("  2) 优先使用 STS 临时凭证（短时有效），降低泄漏风险。")
-    print("  3) 开启 AccessKey IP 白名单，仅放行实际出口 NAT IP。")
+_I18N_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "i18n")
+_I18N_CACHE = {}
+
+
+def _load_i18n(lang):
+    if lang in _I18N_CACHE:
+        return _I18N_CACHE[lang]
+    path = os.path.join(_I18N_DIR, f"{lang}.json")
+    if not os.path.isfile(path):
+        if lang != "en":
+            return _load_i18n("en")
+        print(f"[ERR] i18n file not found: {path}")
+        sys.exit(2)
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    _I18N_CACHE[lang] = data
+    return data
+
+
+def print_security_reminders(has_sts_token, lang="en"):
+    msgs = _load_i18n(lang).get("security", {})
+    print(msgs.get("header", ""))
+    for tip in msgs.get("tips", []):
+        print(f"  {tip}")
     if not has_sts_token:
-        print("[SECURITY][WARN] 当前未检测到 STS SecurityToken，疑似长期 AK/SK。")
+        print(msgs.get("warn", ""))
 
 
 def main():
@@ -204,6 +270,9 @@ def main():
     ap.add_argument("--site-id", required=False, help="ESA site id (optional; auto-detect by domain if omitted)")
     ap.add_argument("--ak", default=os.getenv("ALIYUN_AK"))
     ap.add_argument("--sk", default=os.getenv("ALIYUN_SK"))
+    _available_langs = [f.removesuffix(".json") for f in os.listdir(_I18N_DIR) if f.endswith(".json")] if os.path.isdir(_I18N_DIR) else ["en"]
+    ap.add_argument("--lang", default="en", choices=_available_langs,
+                    help="output language for security reminders (default: en)")
     ap.add_argument("--auto-install-deps", dest="auto_install_deps", action="store_true", default=True)
     ap.add_argument("--no-auto-install-deps", dest="auto_install_deps", action="store_false")
     ap.add_argument("--ttl", default="60")
@@ -225,7 +294,7 @@ def main():
         sys.exit(2)
 
     sts_token = os.getenv("ALIYUN_SECURITY_TOKEN") or os.getenv("SECURITY_TOKEN")
-    print_security_reminders(bool(sts_token))
+    print_security_reminders(bool(sts_token), lang=args.lang)
     secrets = [args.ak, args.sk, sts_token]
 
     # de-dup while preserving order
@@ -234,21 +303,42 @@ def main():
     issue_domains = [main_domain] + [d for d in domains if d != main_domain]
 
     acme_sh = find_acme_sh()
-    client = AcsClient(args.ak, args.sk, "cn-hangzhou")
 
-    # Resolve site id/site name
+    global _REGION
     base_domain = main_domain.lstrip("*.")
+
+    # Auto-detect region + site, or use explicit site-id
     if args.site_id:
         site_id = str(args.site_id)
+        # Still need to find the correct region — probe regions with GetSite
+        detected_region = None
         zone = base_domain
-        try:
-            site = esa_req(client, "GetSite", "POST", SiteId=site_id)
-            zone = (site.get("SiteName") or base_domain)
-        except Exception:
-            pass
+        regions = _discover_esa_regions(AcsClient(args.ak, args.sk, _DEFAULT_SEED_REGION))
+        for region in regions:
+            try:
+                client_tmp = AcsClient(args.ak, args.sk, region)
+                site = esa_req(client_tmp, "GetSite", "POST", region=region, SiteId=site_id)
+                zone = (site.get("SiteName") or base_domain)
+                detected_region = region
+                break
+            except Exception:
+                continue
+        if not detected_region:
+            print(f"[ERR] SiteId={site_id} not found in any known ESA region")
+            sys.exit(2)
+        _REGION = detected_region
+        client = AcsClient(args.ak, args.sk, _REGION)
+        print(f"[OK] auto-detected region={_REGION} for SiteId={site_id} site={zone}")
     else:
-        site_id, zone = auto_site_id(client, base_domain)
-        print(f"[OK] auto-detected SiteId={site_id} for site={zone}")
+        # Probe all regions to find the domain
+        client_probe = AcsClient(args.ak, args.sk, "cn-hangzhou")  # region for AcsClient doesn't matter for CommonRequest
+        detected_region, site_id, zone = auto_detect_region(client_probe, base_domain)
+        if not detected_region:
+            print(f"[ERR] No ESA site matched domain '{base_domain}' in any known region")
+            sys.exit(2)
+        _REGION = detected_region
+        client = AcsClient(args.ak, args.sk, _REGION)
+        print(f"[OK] auto-detected region={_REGION} SiteId={site_id} for site={zone}")
 
     # optional: ensure A records before cert flow
     for item in args.ensure_a_record:

@@ -1,28 +1,27 @@
 # ali-esa-acme-ssl-skill
 
+[中文文档](README_zh.md)
+
 OpenClaw skill for **automatic HTTPS certificate issuance/renewal** using **Alibaba Cloud ESA DNS + acme.sh**, with optional automatic installation to Nginx.
 
 ## What this skill solves
 
-When domains are hosted on ESA (`*.atrustdns.com`), DNS-01 records must be written to ESA DNS, not traditional AliDNS.
-This skill standardizes that workflow and reduces common errors like:
+AI models often resolve to the wrong place: they write records to traditional AliDNS, while the correct target should be ESA DNS. These two DNS systems are independent.
 
-- `No TXT record found at _acme-challenge...`
-- `InvalidRecordNameSuffix`
-- Misusing `.csr` as Nginx certificate
+In other words, when a domain is hosted on ESA (`*.atrustdns.com`), DNS-01 validation records must be written to ESA DNS, not traditional AliDNS.
 
 ## Environment compatibility
 
-- ✅ Linux hosts (recommended: Ubuntu/CentOS)
-- ✅ System-level Nginx deployments (LNMP/LAMP)
-- ✅ Non-container environments
-- ⚠️ Not guaranteed on Windows/macOS
-- ⚠️ Not guaranteed inside Docker for install/reload behavior
+- ✅ Linux hosts (Ubuntu tested)
+- ✅ System-level Nginx deployments (LNMP tested)
+- ❌ Non-container environments
+- ❌ Windows/macOS not tested
 
 ## Project structure
 
-- `SKILL.md` – Trigger rules and usage guidance for the agent
+- `SKILL.md` – Trigger rules and usage guidance for the agent ([中文](SKILL_zh.md), for author reference when coding)
 - `scripts/esa_acme_issue.py` – Automation script
+- `scripts/i18n/` – Language files (en.json, zh.json, …) for script output
 - `evals/evals.json` – Basic evaluation prompts
 
 ## First-time acme.sh setup
@@ -54,7 +53,7 @@ export ALIYUN_SK='YOUR_SK'
 ### 2) Single domain
 
 ```bash
-python3 scripts/esa_acme_issue.py -d g.example.com
+python3 scripts/esa_acme_issue.py -d test.example.com
 ```
 
 ### 3) Apex + wildcard
@@ -63,23 +62,31 @@ python3 scripts/esa_acme_issue.py -d g.example.com
 python3 scripts/esa_acme_issue.py -d example.com -d '*.example.com'
 ```
 
+### 4) With Chinese output
+
+```bash
+python3 scripts/esa_acme_issue.py -d example.com --lang zh
+```
+
 ## Defaults
 
-- Auto-detect ESA `SiteId` by domain suffix (override with `--site-id`)
 - Auto-install cert to Nginx by default (disable with `--no-install-cert`)
 - `--dns-timeout` default is `600`
 - Optional A record management: `--ensure-a-record host=ip` (with authoritative NS propagation verification)
 - Overwrite protection: existing A value will NOT be overwritten unless `--confirm-overwrite` is provided
 
 Example:
+
 ```bash
 python3 scripts/esa_acme_issue.py \
-  -d claw.example.com \
-  --ensure-a-record claw.example.com=1.2.3.4
+  -d test.example.com \
+  --ensure-a-record test.example.com=1.2.3.4
 ```
 
 ## Completion criteria (anti false-positive)
+
 Do not say "DNS record is done" unless both checks pass:
+
 1. ESA `ListRecords` confirms the exact `RecordName + Type + Value`
 2. Authoritative NS query (`dig @ns TXT`) returns the expected token
 
@@ -89,25 +96,28 @@ If only CreateRecord API returned success, report it as "request accepted" (not 
 
 - `No TXT record found`: increase `--dns-timeout`, verify authoritative NS propagation
 - `InvalidRecordNameSuffix`: domain does not belong to current ESA site suffix
-- `cannot load certificate ... .csr`: use `.crt/fullchain + .key`, not CSR
 
 ## FAQ
 
 ### Q: I set an IP whitelist on AccessKey. What should I check?
+
 A: This is a common cause of "permission"-like failures.
 
 - Ensure the **current egress public IP** of the server is in the whitelist
 - If using proxy/NAT, whitelist the **actual outbound NAT IP**, not LAN IP
 - Verify IP first:
+
   ```bash
   curl -s ifconfig.me
   ```
+
 - If whitelist is strict, API calls may fail even when AK/SK and RAM policy are correct
 - After changing whitelist, wait a short propagation window and retry
 
 ## Security notes
 
 Always remind users of these 1/2/3 before execution:
+
 1. Use least-privilege RAM sub-account keys instead of long-term root keys
 2. Prefer STS temporary credentials whenever possible
 3. Enable AccessKey IP allowlist for actual outbound NAT IP

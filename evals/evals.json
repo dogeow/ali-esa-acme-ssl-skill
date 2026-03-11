@@ -1,9 +1,9 @@
 {
-  "skill_name": "esa-dns-acme",
+  "skill_name": "ali-esa-acme-ssl-skill",
   "evals": [
     {
       "id": 1,
-      "prompt": "我的域名在阿里云 ESA，NS 是 atrustdns。帮我申请 g.example.com 证书并自动配到 Nginx。",
+      "prompt": "我的域名在阿里云 ESA，NS 是 atrustdns。帮我申请 test.example.com 证书并自动配到 Nginx。",
       "expected_output": "给出依赖检查、执行脚本命令（单域）、成功判定与 Nginx 证书路径。",
       "files": []
     },
