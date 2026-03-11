@@ -1,6 +1,6 @@
 # ali-esa-acme-ssl-skill
 
-[中文文档](README_zh.md)
+[Chinese Documentation](README_zh.md)
 
 OpenClaw skill for **automatic HTTPS certificate issuance/renewal** using **Alibaba Cloud ESA DNS + acme.sh**, with optional automatic installation to Nginx.
 
@@ -14,12 +14,12 @@ In other words, when a domain is hosted on ESA (`*.atrustdns.com`), DNS-01 valid
 
 - ✅ Linux hosts (Ubuntu tested)
 - ✅ System-level Nginx deployments (LNMP tested)
-- ❌ Non-container environments
+- ❌ Containerized environments (Docker not supported)
 - ❌ Windows/macOS not tested
 
 ## Project structure
 
-- `SKILL.md` – Trigger rules and usage guidance for the agent ([中文](SKILL_zh.md), for author reference when coding)
+- `SKILL.md` – Trigger rules and usage guidance for the agent
 - `scripts/esa_acme_issue.py` – Automation script
 - `scripts/i18n/` – Language files (en.json, zh.json, …) for script output
 - `evals/evals.json` – Basic evaluation prompts

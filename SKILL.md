@@ -5,8 +5,6 @@ description: Automatically issue/renew HTTPS certificates using Alibaba Cloud ES
 
 # ESA DNS + ACME Certificate Automation
 
-[中文版](SKILL_zh.md)
-
 ## Design Decision (Important)
 This skill **combines acme.sh + ESA DNS** into a single integrated flow, not split into two skills.
 
@@ -33,7 +31,7 @@ Trigger when any of the following apply:
 
 - Linux hosts (recommended: Ubuntu tested)
 - System-level Nginx (LNMP tested)
-- Non-Docker scenarios
+- Docker/containerized environments are not supported
 - Not tested on Windows/macOS
 
 ## Prerequisites

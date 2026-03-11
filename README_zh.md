@@ -14,12 +14,12 @@ AI 模型总是解析到错误的地方，它到传统的云解析 DNS 那边解
 
 - ✅ Linux 主机（Ubuntu 已测试）
 - ✅ 系统级 Nginx（LNMP 已测试）
-- ❌ 非容器环境
+- ❌ 容器环境（不支持 Docker）
 - ❌ 没有测试 Windows/macOS
 
 ## 项目结构
 
-- `SKILL.md` – Agent 触发规则和使用指南（[中文](SKILL_zh.md)，只用来作者阅读然后编写代码）
+- `SKILL.md` – Agent 触发规则和使用指南
 - `scripts/esa_acme_issue.py` – 自动化脚本
 - `scripts/i18n/` – 脚本输出的语言文件（en.json、zh.json 等）
 - `evals/evals.json` – 基础评估用例

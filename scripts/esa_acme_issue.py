@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import importlib.util
+import ipaddress
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -11,9 +13,19 @@ import time
 
 
 
-def run(cmd):
-    p = subprocess.run(cmd, shell=True, text=True, capture_output=True)
-    return p.returncode, p.stdout + p.stderr
+DEFAULT_CMD_TIMEOUT = 300
+DIG_CMD_TIMEOUT = 20
+ACME_CMD_TIMEOUT_PADDING = 900
+
+
+def run(cmd, timeout=DEFAULT_CMD_TIMEOUT):
+    try:
+        p = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or "") + (e.stderr or "")
+        out += f"\n[ERR] command timed out after {timeout}s: {' '.join(cmd)}"
+        return 124, out
 
 
 def redact_text(text, secrets=None):
@@ -26,6 +38,43 @@ def redact_text(text, secrets=None):
     return out
 
 
+def is_valid_host(host):
+    if not host or len(host) > 253 or host.startswith("*.") or ".." in host:
+        return False
+    labels = host.rstrip(".").split(".")
+    for label in labels:
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,63}", label):
+            return False
+        if label.startswith("-") or label.endswith("-"):
+            return False
+    return True
+
+
+def is_valid_ip(ip):
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except ValueError:
+        return False
+
+
+def query_authoritative_records(zone, name, rrtype):
+    code, ns_out = run(["dig", "+short", "NS", zone], timeout=DIG_CMD_TIMEOUT)
+    if code != 0:
+        return code, ns_out
+
+    nameservers = [line.strip() for line in ns_out.splitlines() if line.strip()]
+    blocks = []
+    for ns in nameservers:
+        _, ans_out = run(["dig", "+short", rrtype, name, f"@{ns}"], timeout=DIG_CMD_TIMEOUT)
+        blocks.append(f"== {ns} ==\n{ans_out.strip()}")
+
+    merged = "\n".join(blocks)
+    if merged and not merged.endswith("\n"):
+        merged += "\n"
+    return 0, merged
+
+
 ESA_API_VERSION = "2024-09-10"
 _REGION = None  # must be auto-detected before use
 _DEFAULT_SEED_REGION = "cn-hangzhou"
@@ -36,9 +85,14 @@ def _discover_esa_regions(client):
     try:
         resp = esa_req(client, "DescribeRegions", "GET", region=_DEFAULT_SEED_REGION)
         regions = resp.get("Regions", [])
-        return [r["RegionId"] for r in regions if r.get("RegionId")]
-    except Exception:
+        discovered = [r["RegionId"] for r in regions if r.get("RegionId")]
+        if discovered:
+            return discovered
+        print(f"[WARN] DescribeRegions returned no region list, fallback to {_DEFAULT_SEED_REGION}.")
+        return [_DEFAULT_SEED_REGION]
+    except Exception as e:
         # Fallback: if DescribeRegions not available, use seed region only
+        print(f"[WARN] DescribeRegions failed: {e}. Fallback to {_DEFAULT_SEED_REGION}.")
         return [_DEFAULT_SEED_REGION]
 
 
@@ -72,7 +126,7 @@ def wait_txt(zone, fqdn, expected, timeout=240):
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
-        code, out = run(f"for ns in $(dig +short NS {zone}); do echo '== '$ns' =='; dig +short TXT {fqdn} @$ns; done")
+        code, out = query_authoritative_records(zone, fqdn, "TXT")
         last = out
         # require all authoritative NS answers to include expected token
         blocks = [b.strip() for b in out.split('== ') if b.strip()]
@@ -116,7 +170,7 @@ def wait_a_record(zone, host, expected_ip, timeout=300):
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
-        code, out = run(f"for ns in $(dig +short NS {zone}); do echo '== '$ns' =='; dig +short A {host} @$ns; done")
+        code, out = query_authoritative_records(zone, host, "A")
         last = out
         blocks = [b.strip() for b in out.split('== ') if b.strip()]
         ok_all = True
@@ -220,7 +274,15 @@ def ensure_python_deps(auto_install=True):
         print("[ERR] missing python deps: aliyun-python-sdk-core / aliyun-python-sdk-alidns")
         sys.exit(2)
     print("[INFO] installing python deps...")
-    code, out = run("python3 -m pip install --user aliyun-python-sdk-core aliyun-python-sdk-alidns")
+    code, out = run([
+        "python3",
+        "-m",
+        "pip",
+        "install",
+        "--user",
+        "aliyun-python-sdk-core",
+        "aliyun-python-sdk-alidns",
+    ], timeout=600)
     print(redact_text(out))
     if code != 0:
         print("[ERR] failed to auto-install python deps")
@@ -270,8 +332,14 @@ def main():
     ap.add_argument("--site-id", required=False, help="ESA site id (optional; auto-detect by domain if omitted)")
     ap.add_argument("--ak", default=os.getenv("ALIYUN_AK"))
     ap.add_argument("--sk", default=os.getenv("ALIYUN_SK"))
-    _available_langs = [f.removesuffix(".json") for f in os.listdir(_I18N_DIR) if f.endswith(".json")] if os.path.isdir(_I18N_DIR) else ["en"]
-    ap.add_argument("--lang", default="en", choices=_available_langs,
+    if os.path.isdir(_I18N_DIR):
+        _available_langs = sorted([f[:-5] for f in os.listdir(_I18N_DIR) if f.endswith(".json")])
+    else:
+        _available_langs = ["en"]
+    if not _available_langs:
+        _available_langs = ["en"]
+    default_lang = "en" if "en" in _available_langs else _available_langs[0]
+    ap.add_argument("--lang", default=default_lang, choices=_available_langs,
                     help="output language for security reminders (default: en)")
     ap.add_argument("--auto-install-deps", dest="auto_install_deps", action="store_true", default=True)
     ap.add_argument("--no-auto-install-deps", dest="auto_install_deps", action="store_false")
@@ -348,12 +416,28 @@ def main():
         host, ip = item.split("=", 1)
         host = host.strip()
         ip = ip.strip()
+        if not is_valid_host(host):
+            print(f"[ERR] invalid host in --ensure-a-record: {host}")
+            sys.exit(2)
+        if not is_valid_ip(ip):
+            print(f"[ERR] invalid IP in --ensure-a-record: {ip}")
+            sys.exit(2)
         ensure_a_record(client, site_id, zone, host, ip, dns_timeout=args.dns_timeout, confirm_overwrite=args.confirm_overwrite)
 
     # 1) get challenge token(s) via manual dns mode
-    d_args = " ".join([f"-d '{d}'" for d in issue_domains])
-    issue_cmd = f"'{acme_sh}' --issue --dns {d_args} --yes-I-know-dns-manual-mode-enough-go-ahead-please --keylength ec-256"
-    code, out = run(issue_cmd)
+    issue_cmd = [
+        acme_sh,
+        "--issue",
+        "--dns",
+    ]
+    for d in issue_domains:
+        issue_cmd.extend(["-d", d])
+    issue_cmd.extend([
+        "--yes-I-know-dns-manual-mode-enough-go-ahead-please",
+        "--keylength",
+        "ec-256",
+    ])
+    code, out = run(issue_cmd, timeout=args.dns_timeout + ACME_CMD_TIMEOUT_PADDING)
     challenges = parse_challenges(out)
     if not challenges:
         print(redact_text(out, secrets))
@@ -410,8 +494,16 @@ def main():
             print(f"[OK] authoritative TXT visible: {fqdn} ({len(tokens)} value(s))")
 
         # 4) renew/sign (manual mode requires renew after issue)
-        renew = f"'{acme_sh}' --renew -d '{main_domain}' --yes-I-know-dns-manual-mode-enough-go-ahead-please --keylength ec-256"
-        code, out = run(renew)
+        renew_cmd = [
+            acme_sh,
+            "--renew",
+            "-d",
+            main_domain,
+            "--yes-I-know-dns-manual-mode-enough-go-ahead-please",
+            "--keylength",
+            "ec-256",
+        ]
+        code, out = run(renew_cmd, timeout=args.dns_timeout + ACME_CMD_TIMEOUT_PADDING)
         print(redact_text(out, secrets))
         if code != 0:
             print("[ERR] renew/sign failed")
@@ -419,13 +511,33 @@ def main():
 
         # 5) optional install
         if args.install_cert:
-            cert_src = f"/root/.acme.sh/{main_domain}_ecc/fullchain.cer"
-            key_src = f"/root/.acme.sh/{main_domain}_ecc/{main_domain}.key"
+            acme_home = os.path.dirname(os.path.abspath(acme_sh))
+            cert_src = os.path.join(acme_home, f"{main_domain}_ecc", "fullchain.cer")
+            key_src = os.path.join(acme_home, f"{main_domain}_ecc", f"{main_domain}.key")
             cert_dst = args.cert_path or f"/etc/nginx/ssl/{main_domain}.crt"
             key_dst = args.key_path or f"/etc/nginx/ssl/{main_domain}.key"
-            run(f"install -m 600 '{key_src}' '{key_dst}'")
-            run(f"install -m 644 '{cert_src}' '{cert_dst}'")
-            code, out = run(args.reload_cmd)
+            if not os.path.isfile(cert_src) or not os.path.isfile(key_src):
+                print(f"[ERR] expected cert/key not found: {cert_src}, {key_src}")
+                sys.exit(5)
+            code, out = run(["install", "-m", "600", key_src, key_dst], timeout=120)
+            if code != 0:
+                print(redact_text(out, secrets))
+                print("[ERR] failed to install private key")
+                sys.exit(5)
+            code, out = run(["install", "-m", "644", cert_src, cert_dst], timeout=120)
+            if code != 0:
+                print(redact_text(out, secrets))
+                print("[ERR] failed to install certificate")
+                sys.exit(5)
+            try:
+                reload_cmd = shlex.split(args.reload_cmd)
+            except ValueError as e:
+                print(f"[ERR] invalid --reload-cmd: {e}")
+                sys.exit(2)
+            if not reload_cmd:
+                print("[ERR] empty --reload-cmd")
+                sys.exit(2)
+            code, out = run(reload_cmd, timeout=120)
             print(redact_text(out, secrets))
             if code == 0:
                 print(f"[OK] installed to {cert_dst}, {key_dst}")

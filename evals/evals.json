@@ -3,20 +3,20 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "我的域名在阿里云 ESA，NS 是 atrustdns。帮我申请 test.example.com 证书并自动配到 Nginx。",
-      "expected_output": "给出依赖检查、执行脚本命令（单域）、成功判定与 Nginx 证书路径。",
+      "prompt": "My domain is on Alibaba Cloud ESA and its NS is atrustdns. Help me issue a certificate for test.example.com and configure it to Nginx automatically.",
+      "expected_output": "Provide dependency checks, the single-domain script command, completion criteria, and the Nginx certificate path.",
       "files": []
     },
     {
       "id": 2,
-      "prompt": "我要同时申请 example.com 和 *.example.com，用 ESA DNS 自动搞定。",
-      "expected_output": "给出泛域命令（-d example.com -d '*.example.com'），强调通配符引号与 DNS 传播等待。",
+      "prompt": "I need to issue both example.com and *.example.com together using ESA DNS automation.",
+      "expected_output": "Provide the wildcard issuance command (-d example.com -d '*.example.com') and emphasize wildcard quoting and DNS propagation waiting.",
       "files": []
     },
     {
       "id": 3,
-      "prompt": "报错 No TXT record found at _acme-challenge.example.com，怎么排查？",
-      "expected_output": "给出权威 NS 查询方法、timeout 调整建议、以及 ESA/非 AliDNS 控制面的区分。",
+      "prompt": "I got the error 'No TXT record found at _acme-challenge.example.com'. How should I troubleshoot it?",
+      "expected_output": "Explain authoritative NS checks, timeout adjustment guidance, and the difference between ESA DNS and traditional AliDNS control planes.",
       "files": []
     }
   ]
