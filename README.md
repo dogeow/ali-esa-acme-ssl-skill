@@ -68,6 +68,22 @@ python3 scripts/esa_acme_issue.py -d example.com -d '*.example.com'
 - Auto-detect ESA `SiteId` by domain suffix (override with `--site-id`)
 - Auto-install cert to Nginx by default (disable with `--no-install-cert`)
 - `--dns-timeout` default is `600`
+- Optional A record management: `--ensure-a-record host=ip` (with authoritative NS propagation verification)
+- Overwrite protection: existing A value will NOT be overwritten unless `--confirm-overwrite` is provided
+
+Example:
+```bash
+python3 scripts/esa_acme_issue.py \
+  -d claw.example.com \
+  --ensure-a-record claw.example.com=1.2.3.4
+```
+
+## Completion criteria (anti false-positive)
+Do not say "DNS record is done" unless both checks pass:
+1. ESA `ListRecords` confirms the exact `RecordName + Type + Value`
+2. Authoritative NS query (`dig @ns TXT`) returns the expected token
+
+If only CreateRecord API returned success, report it as "request accepted" (not completed).
 
 ## Common troubleshooting
 
@@ -75,7 +91,26 @@ python3 scripts/esa_acme_issue.py -d example.com -d '*.example.com'
 - `InvalidRecordNameSuffix`: domain does not belong to current ESA site suffix
 - `cannot load certificate ... .csr`: use `.crt/fullchain + .key`, not CSR
 
+## FAQ
+
+### Q: I set an IP whitelist on AccessKey. What should I check?
+A: This is a common cause of "permission"-like failures.
+
+- Ensure the **current egress public IP** of the server is in the whitelist
+- If using proxy/NAT, whitelist the **actual outbound NAT IP**, not LAN IP
+- Verify IP first:
+  ```bash
+  curl -s ifconfig.me
+  ```
+- If whitelist is strict, API calls may fail even when AK/SK and RAM policy are correct
+- After changing whitelist, wait a short propagation window and retry
+
 ## Security notes
+
+Always remind users of these 1/2/3 before execution:
+1. Use least-privilege RAM sub-account keys instead of long-term root keys
+2. Prefer STS temporary credentials whenever possible
+3. Enable AccessKey IP allowlist for actual outbound NAT IP
 
 - Never hardcode AK/SK in script
 - Prefer env vars

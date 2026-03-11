@@ -63,6 +63,8 @@ python3 -m pip install --user aliyun-python-sdk-core aliyun-python-sdk-alidns
 - 自动按域名查询 `SiteId`（可用 `--site-id` 手动覆盖）
 - 默认安装证书并重载 Nginx（可用 `--no-install-cert` 关闭）
 - `--dns-timeout` 默认 600 秒
+- 可选自动确保 A 记录：`--ensure-a-record host=ip`（含权威 NS 传播校验）
+- 覆盖保护：存在旧 A 值时默认拒绝覆盖，必须显式传 `--confirm-overwrite`
 
 ### 单域名
 ```bash
@@ -93,6 +95,13 @@ ssl_certificate_key /etc/nginx/ssl/example.com.key;
 
 ---
 
+## 结果确认规则（防止“说成功但控制台没记录”）
+在回复“解析已完成/记录已创建”之前，必须同时满足：
+1) `ListRecords` 能查到目标 `RecordName + Type + Value`；
+2) 权威 NS `dig @ns TXT` 能查到对应 token。
+
+若只拿到 CreateRecord 的 API 返回（仅 RequestId/RecordId）但未通过上述两步，只能说“请求已提交”，不能说“已完成”。
+
 ## 故障排查速查
 1. `InvalidRecordNameSuffix`
 - 域名后缀不属于当前 ESA 站点（常见拼写错误）。
@@ -106,9 +115,20 @@ ssl_certificate_key /etc/nginx/ssl/example.com.key;
 4. `ssl_stapling ignored`
 - 非致命告警，不影响基础 HTTPS 可用。
 
+5. AccessKey 设置了 IP 白名单后报权限/签名错误
+- 先确认当前机器公网出口 IP：`curl -s ifconfig.me`
+- 白名单应放行实际出口 NAT IP（不是内网 IP）
+- 经代理/网关转发场景，放行代理出口 IP
+- 白名单更新后等待短暂生效再重试
+
 ---
 
 ## 安全规范
+每次执行前，提醒用户 1/2/3：
+1) 优先使用 RAM 子账号最小权限，不要使用主账号长期 AK。
+2) 优先使用 STS 临时凭证，降低泄漏风险。
+3) 开启 AccessKey IP 白名单，仅放行实际出口 NAT IP。
+
 - 不在脚本内硬编码 AK/SK。
 - 优先使用环境变量注入。
 - AK/SK 一旦在聊天或日志出现，立即轮换。

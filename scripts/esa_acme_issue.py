@@ -16,6 +16,16 @@ def run(cmd):
     return p.returncode, p.stdout + p.stderr
 
 
+def redact_text(text, secrets=None):
+    out = text or ""
+    secrets = [s for s in (secrets or []) if s]
+    for s in secrets:
+        out = out.replace(s, "***REDACTED***")
+    # basic AccessKeyId pattern mask
+    out = re.sub(r"LTAI[0-9A-Za-z]{12,}", "LTAI***REDACTED***", out)
+    return out
+
+
 def esa_req(client, action, method="POST", **params):
     from aliyunsdkcore.request import CommonRequest
     req = CommonRequest()
@@ -57,12 +67,76 @@ def wait_txt(zone, fqdn, expected, timeout=240):
     return False, last
 
 
+def wait_record_visible_in_esa(client, site_id, fqdn, token, timeout=120):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            resp = esa_req(client, "ListRecords", "GET", SiteId=site_id)
+            records = resp.get("Records", [])
+            for r in records:
+                if r.get("RecordName") == fqdn and r.get("RecordType") == "TXT":
+                    val = ((r.get("Data") or {}).get("Value") or "")
+                    if val == token:
+                        return True, r.get("RecordId")
+        except Exception:
+            pass
+        time.sleep(3)
+    return False, None
+
+
 def pick_main_domain(domains):
     # Prefer non-wildcard as main domain for acme.sh storage/install path
     for d in domains:
         if not d.startswith("*."):
             return d
     return domains[0].lstrip("*.")
+
+
+def wait_a_record(zone, host, expected_ip, timeout=300):
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        code, out = run(f"for ns in $(dig +short NS {zone}); do echo '== '$ns' =='; dig +short A {host} @$ns; done")
+        last = out
+        blocks = [b.strip() for b in out.split('== ') if b.strip()]
+        ok_all = True
+        for b in blocks:
+            if expected_ip not in b:
+                ok_all = False
+                break
+        if ok_all and blocks:
+            return True, out
+        time.sleep(5)
+    return False, last
+
+
+def ensure_a_record(client, site_id, zone, host, ip, dns_timeout=600, confirm_overwrite=False):
+    records = esa_req(client, "ListRecords", "GET", SiteId=site_id).get("Records", [])
+    target = None
+    for r in records:
+        if r.get("RecordName") == host and r.get("RecordType") == "A/AAAA":
+            target = r
+            break
+    payload = json.dumps({"Value": ip}, separators=(",", ":"))
+    if target:
+        current = ((target.get("Data") or {}).get("Value") or "").strip()
+        if current and current != ip and not confirm_overwrite:
+            print(f"[CONFIRM] Existing A record detected: {host} -> {current}")
+            print(f"[CONFIRM] Requested new value: {ip}")
+            print("[ERR] overwrite blocked. Re-run with --confirm-overwrite after user confirmation.")
+            sys.exit(6)
+        esa_req(client, "UpdateRecord", "POST", SiteId=site_id, RecordId=target.get("RecordId"), Type="A/AAAA", RecordName=host, Ttl=1, Data=payload, Proxied="false")
+        print(f"[INFO] A record update request accepted: {host} -> {ip}")
+    else:
+        esa_req(client, "CreateRecord", "POST", SiteId=site_id, Type="A/AAAA", RecordName=host, Ttl=1, Data=payload, Proxied="false")
+        print(f"[INFO] A record create request accepted: {host} -> {ip}")
+
+    ok, out = wait_a_record(zone, host, ip, timeout=dns_timeout)
+    if not ok:
+        print(out)
+        print(f"[ERR] A record not propagated on all authoritative NS: {host} -> {ip}")
+        sys.exit(4)
+    print(f"[OK] A record propagated on authoritative NS: {host} -> {ip}")
 
 
 def auto_site_id(client, base_domain):
@@ -100,7 +174,7 @@ def ensure_python_deps(auto_install=True):
         sys.exit(2)
     print("[INFO] installing python deps...")
     code, out = run("python3 -m pip install --user aliyun-python-sdk-core aliyun-python-sdk-alidns")
-    print(out)
+    print(redact_text(out))
     if code != 0:
         print("[ERR] failed to auto-install python deps")
         sys.exit(2)
@@ -113,6 +187,15 @@ def find_acme_sh():
             return c
     print("[ERR] acme.sh not found. Install acme.sh first.")
     sys.exit(2)
+
+
+def print_security_reminders(has_sts_token):
+    print("[SECURITY] 请提醒用户以下 1/2/3：")
+    print("  1) 优先使用 RAM 子账号最小权限，不要使用主账号长期 AK。")
+    print("  2) 优先使用 STS 临时凭证（短时有效），降低泄漏风险。")
+    print("  3) 开启 AccessKey IP 白名单，仅放行实际出口 NAT IP。")
+    if not has_sts_token:
+        print("[SECURITY][WARN] 当前未检测到 STS SecurityToken，疑似长期 AK/SK。")
 
 
 def main():
@@ -130,6 +213,8 @@ def main():
     ap.add_argument("--cert-path", default=None, help="target crt path")
     ap.add_argument("--key-path", default=None, help="target key path")
     ap.add_argument("--reload-cmd", default="systemctl reload nginx")
+    ap.add_argument("--ensure-a-record", action="append", default=[], help="ensure A/AAAA record, format: host=ip")
+    ap.add_argument("--confirm-overwrite", action="store_true", default=False, help="required to overwrite existing A/AAAA record value")
     args = ap.parse_args()
 
     ensure_python_deps(auto_install=args.auto_install_deps)
@@ -138,6 +223,10 @@ def main():
     if not args.ak or not args.sk:
         print("[ERR] missing --ak/--sk (or env ALIYUN_AK/ALIYUN_SK)")
         sys.exit(2)
+
+    sts_token = os.getenv("ALIYUN_SECURITY_TOKEN") or os.getenv("SECURITY_TOKEN")
+    print_security_reminders(bool(sts_token))
+    secrets = [args.ak, args.sk, sts_token]
 
     # de-dup while preserving order
     domains = list(dict.fromkeys(args.domain))
@@ -161,13 +250,23 @@ def main():
         site_id, zone = auto_site_id(client, base_domain)
         print(f"[OK] auto-detected SiteId={site_id} for site={zone}")
 
+    # optional: ensure A records before cert flow
+    for item in args.ensure_a_record:
+        if "=" not in item:
+            print(f"[ERR] invalid --ensure-a-record format: {item}, expect host=ip")
+            sys.exit(2)
+        host, ip = item.split("=", 1)
+        host = host.strip()
+        ip = ip.strip()
+        ensure_a_record(client, site_id, zone, host, ip, dns_timeout=args.dns_timeout, confirm_overwrite=args.confirm_overwrite)
+
     # 1) get challenge token(s) via manual dns mode
     d_args = " ".join([f"-d '{d}'" for d in issue_domains])
     issue_cmd = f"'{acme_sh}' --issue --dns {d_args} --yes-I-know-dns-manual-mode-enough-go-ahead-please --keylength ec-256"
     code, out = run(issue_cmd)
     challenges = parse_challenges(out)
     if not challenges:
-        print(out)
+        print(redact_text(out, secrets))
         print("[ERR] failed to parse challenge tokens")
         sys.exit(3)
 
@@ -199,15 +298,23 @@ def main():
                     Proxied="false",
                 )
                 rid = rec.get("RecordId")
-                record_ids.append(rid)
-                print(f"[OK] ESA TXT created: {fqdn} token={token[:10]}... RecordId={rid}")
+                print(f"[INFO] ESA API accepted create request: {fqdn} token={token[:10]}... RecordId={rid}")
+
+                visible, confirmed_rid = wait_record_visible_in_esa(client, site_id, fqdn, token, timeout=120)
+                if not visible:
+                    print(f"[ERR] ESA record not visible after create: {fqdn} token={token}")
+                    print("[ERR] Do NOT claim DNS is ready. Please check ESA console/API permissions/filters.")
+                    sys.exit(4)
+
+                record_ids.append(confirmed_rid or rid)
+                print(f"[OK] ESA TXT confirmed in ListRecords: {fqdn} RecordId={confirmed_rid or rid}")
 
         # 3) wait propagation for each token on each fqdn
         for fqdn, tokens in grouped.items():
             for token in tokens:
                 ok, out = wait_txt(zone, fqdn, token, timeout=args.dns_timeout)
                 if not ok:
-                    print(out)
+                    print(redact_text(out, secrets))
                     print(f"[ERR] TXT not propagated: {fqdn} token={token}")
                     sys.exit(4)
             print(f"[OK] authoritative TXT visible: {fqdn} ({len(tokens)} value(s))")
@@ -215,7 +322,7 @@ def main():
         # 4) renew/sign (manual mode requires renew after issue)
         renew = f"'{acme_sh}' --renew -d '{main_domain}' --yes-I-know-dns-manual-mode-enough-go-ahead-please --keylength ec-256"
         code, out = run(renew)
-        print(out)
+        print(redact_text(out, secrets))
         if code != 0:
             print("[ERR] renew/sign failed")
             sys.exit(5)
@@ -229,7 +336,7 @@ def main():
             run(f"install -m 600 '{key_src}' '{key_dst}'")
             run(f"install -m 644 '{cert_src}' '{cert_dst}'")
             code, out = run(args.reload_cmd)
-            print(out)
+            print(redact_text(out, secrets))
             if code == 0:
                 print(f"[OK] installed to {cert_dst}, {key_dst}")
             else:
