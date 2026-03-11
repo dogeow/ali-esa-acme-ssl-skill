@@ -5,7 +5,6 @@ import ipaddress
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -22,6 +21,10 @@ def run(cmd, timeout=DEFAULT_CMD_TIMEOUT):
     try:
         p = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
         return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except FileNotFoundError:
+        return 127, f"[ERR] command not found: {cmd[0]}"
+    except OSError as e:
+        return 127, f"[ERR] failed to execute command: {' '.join(cmd)} ({e})"
     except subprocess.TimeoutExpired as e:
         out = (e.stdout or "") + (e.stderr or "")
         out += f"\n[ERR] command timed out after {timeout}s: {' '.join(cmd)}"
@@ -58,21 +61,75 @@ def is_valid_ip(ip):
         return False
 
 
+def normalize_ip(ip):
+    return str(ipaddress.ip_address(ip))
+
+
+def is_valid_domain_for_cert(domain):
+    if not domain:
+        return False
+    if domain.startswith("*."):
+        return is_valid_host(domain[2:])
+    return is_valid_host(domain)
+
+
+def normalize_domains(domains):
+    normalized = []
+    for domain in domains or []:
+        value = (domain or "").strip()
+        if not value:
+            continue
+        if not is_valid_domain_for_cert(value):
+            raise ValueError(f"invalid domain: {domain}")
+        if value not in normalized:
+            normalized.append(value)
+    if not normalized:
+        raise ValueError("no valid domains provided")
+    return normalized
+
+
+def build_domain_plan(domains):
+    normalized = normalize_domains(domains)
+    primary_domain = next((d for d in normalized if not d.startswith("*.")), normalized[0])
+    issue_domains = [primary_domain] + [d for d in normalized if d != primary_domain]
+    cert_basename = next((d for d in normalized if not d.startswith("*.")), primary_domain.lstrip("*."))
+    return {
+        "primary_domain": primary_domain,
+        "issue_domains": issue_domains,
+        "base_domain": primary_domain.lstrip("*."),
+        "cert_basename": cert_basename.lstrip("*."),
+    }
+
+
+def record_type_for_ip(ip):
+    return "AAAA" if ipaddress.ip_address(ip).version == 6 else "A"
+
+
+def _authoritative_blocks(output):
+    return [block.strip() for block in (output or "").split("== ") if block.strip()]
+
+
 def query_authoritative_records(zone, name, rrtype):
     code, ns_out = run(["dig", "+short", "NS", zone], timeout=DIG_CMD_TIMEOUT)
     if code != 0:
         return code, ns_out
 
     nameservers = [line.strip() for line in ns_out.splitlines() if line.strip()]
+    if not nameservers:
+        return 2, f"[ERR] no authoritative nameservers found for zone: {zone}"
+
     blocks = []
+    overall_code = 0
     for ns in nameservers:
-        _, ans_out = run(["dig", "+short", rrtype, name, f"@{ns}"], timeout=DIG_CMD_TIMEOUT)
+        ans_code, ans_out = run(["dig", "+short", rrtype, name, f"@{ns}"], timeout=DIG_CMD_TIMEOUT)
+        if ans_code != 0 and overall_code == 0:
+            overall_code = ans_code
         blocks.append(f"== {ns} ==\n{ans_out.strip()}")
 
     merged = "\n".join(blocks)
     if merged and not merged.endswith("\n"):
         merged += "\n"
-    return 0, merged
+    return overall_code, merged
 
 
 ESA_API_VERSION = "2024-09-10"
@@ -122,19 +179,16 @@ def parse_challenges(output):
     return [{"fqdn": d, "token": t} for d, t in pairs]
 
 
-def wait_txt(zone, fqdn, expected, timeout=240):
+def wait_dns_record(zone, fqdn, expected, rrtype, timeout=240):
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
-        code, out = query_authoritative_records(zone, fqdn, "TXT")
+        code, out = query_authoritative_records(zone, fqdn, rrtype)
         last = out
-        # require all authoritative NS answers to include expected token
-        blocks = [b.strip() for b in out.split('== ') if b.strip()]
-        ok_all = True
-        for b in blocks:
-            if expected not in b:
-                ok_all = False
-                break
+        if code in {2, 127}:
+            return False, out
+        blocks = _authoritative_blocks(out)
+        ok_all = all(expected in block for block in blocks)
         if ok_all and blocks:
             return True, out
         time.sleep(5)
@@ -158,59 +212,35 @@ def wait_record_visible_in_esa(client, site_id, fqdn, token, timeout=120):
     return False, None
 
 
-def pick_main_domain(domains):
-    # Prefer non-wildcard as main domain for acme.sh storage/install path
-    for d in domains:
-        if not d.startswith("*."):
-            return d
-    return domains[0].lstrip("*.")
-
-
-def wait_a_record(zone, host, expected_ip, timeout=300):
-    deadline = time.time() + timeout
-    last = ""
-    while time.time() < deadline:
-        code, out = query_authoritative_records(zone, host, "A")
-        last = out
-        blocks = [b.strip() for b in out.split('== ') if b.strip()]
-        ok_all = True
-        for b in blocks:
-            if expected_ip not in b:
-                ok_all = False
-                break
-        if ok_all and blocks:
-            return True, out
-        time.sleep(5)
-    return False, last
-
-
 def ensure_a_record(client, site_id, zone, host, ip, dns_timeout=600, confirm_overwrite=False):
+    ip = normalize_ip(ip)
+    rrtype = record_type_for_ip(ip)
     records = esa_req(client, "ListRecords", "GET", SiteId=site_id).get("Records", [])
     target = None
     for r in records:
-        if r.get("RecordName") == host and r.get("RecordType") == "A/AAAA":
+        if r.get("RecordName") == host and r.get("RecordType") in {"A/AAAA", "A", "AAAA"}:
             target = r
             break
     payload = json.dumps({"Value": ip}, separators=(",", ":"))
     if target:
         current = ((target.get("Data") or {}).get("Value") or "").strip()
         if current and current != ip and not confirm_overwrite:
-            print(f"[CONFIRM] Existing A record detected: {host} -> {current}")
+            print(f"[CONFIRM] Existing {rrtype} record detected: {host} -> {current}")
             print(f"[CONFIRM] Requested new value: {ip}")
             print("[ERR] overwrite blocked. Re-run with --confirm-overwrite after user confirmation.")
             sys.exit(6)
         esa_req(client, "UpdateRecord", "POST", SiteId=site_id, RecordId=target.get("RecordId"), Type="A/AAAA", RecordName=host, Ttl=1, Data=payload, Proxied="false")
-        print(f"[INFO] A record update request accepted: {host} -> {ip}")
+        print(f"[INFO] {rrtype} record update request accepted: {host} -> {ip}")
     else:
         esa_req(client, "CreateRecord", "POST", SiteId=site_id, Type="A/AAAA", RecordName=host, Ttl=1, Data=payload, Proxied="false")
-        print(f"[INFO] A record create request accepted: {host} -> {ip}")
+        print(f"[INFO] {rrtype} record create request accepted: {host} -> {ip}")
 
-    ok, out = wait_a_record(zone, host, ip, timeout=dns_timeout)
+    ok, out = wait_dns_record(zone, host, ip, rrtype=rrtype, timeout=dns_timeout)
     if not ok:
         print(out)
-        print(f"[ERR] A record not propagated on all authoritative NS: {host} -> {ip}")
+        print(f"[ERR] {rrtype} record not propagated on all authoritative NS: {host} -> {ip}")
         sys.exit(4)
-    print(f"[OK] A record propagated on authoritative NS: {host} -> {ip}")
+    print(f"[OK] {rrtype} record propagated on authoritative NS: {host} -> {ip}")
 
 
 def _list_all_sites(client, region=None):
@@ -271,7 +301,7 @@ def ensure_python_deps(auto_install=True):
     if not missing:
         return
     if not auto_install:
-        print("[ERR] missing python deps: aliyun-python-sdk-core / aliyun-python-sdk-alidns")
+        print("[ERR] missing python deps: aliyun-python-sdk-core")
         sys.exit(2)
     print("[INFO] installing python deps...")
     code, out = run([
@@ -281,7 +311,6 @@ def ensure_python_deps(auto_install=True):
         "install",
         "--user",
         "aliyun-python-sdk-core",
-        "aliyun-python-sdk-alidns",
     ], timeout=600)
     print(redact_text(out))
     if code != 0:
@@ -326,90 +355,154 @@ def print_security_reminders(has_sts_token, lang="en"):
         print(msgs.get("warn", ""))
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Issue cert via acme.sh + ESA DNS TXT automation (supports wildcard)")
-    ap.add_argument("-d", "--domain", action="append", required=True, help="can repeat, e.g. -d example.com -d '*.example.com'")
-    ap.add_argument("--site-id", required=False, help="ESA site id (optional; auto-detect by domain if omitted)")
-    ap.add_argument("--ak", default=os.getenv("ALIYUN_AK"))
-    ap.add_argument("--sk", default=os.getenv("ALIYUN_SK"))
-    if os.path.isdir(_I18N_DIR):
-        _available_langs = sorted([f[:-5] for f in os.listdir(_I18N_DIR) if f.endswith(".json")])
-    else:
-        _available_langs = ["en"]
-    if not _available_langs:
-        _available_langs = ["en"]
-    default_lang = "en" if "en" in _available_langs else _available_langs[0]
-    ap.add_argument("--lang", default=default_lang, choices=_available_langs,
-                    help="output language for security reminders (default: en)")
-    ap.add_argument("--auto-install-deps", dest="auto_install_deps", action="store_true", default=True)
-    ap.add_argument("--no-auto-install-deps", dest="auto_install_deps", action="store_false")
-    ap.add_argument("--ttl", default="60")
-    ap.add_argument("--dns-timeout", type=int, default=600)
-    ap.add_argument("--install-cert", dest="install_cert", action="store_true", default=True)
-    ap.add_argument("--no-install-cert", dest="install_cert", action="store_false")
-    ap.add_argument("--cert-path", default=None, help="target crt path")
-    ap.add_argument("--key-path", default=None, help="target key path")
-    ap.add_argument("--reload-cmd", default="systemctl reload nginx")
-    ap.add_argument("--ensure-a-record", action="append", default=[], help="ensure A/AAAA record, format: host=ip")
-    ap.add_argument("--confirm-overwrite", action="store_true", default=False, help="required to overwrite existing A/AAAA record value")
-    args = ap.parse_args()
-
-    ensure_python_deps(auto_install=args.auto_install_deps)
+def make_acs_client(ak, sk, region, sts_token=None):
     from aliyunsdkcore.client import AcsClient
 
-    if not args.ak or not args.sk:
-        print("[ERR] missing --ak/--sk (or env ALIYUN_AK/ALIYUN_SK)")
+    if sts_token:
+        try:
+            from aliyunsdkcore.auth.credentials import StsTokenCredential
+            credentials = StsTokenCredential(ak, sk, sts_token)
+            return AcsClient(region_id=region, credential=credentials)
+        except Exception:
+            try:
+                return AcsClient(ak, sk, region, security_token=sts_token)
+            except TypeError:
+                pass
+    return AcsClient(ak, sk, region)
+
+
+def ensure_parent_dirs(paths):
+    for path in paths:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+
+def install_certificate(acme_sh, primary_domain, cert_dst, key_dst, reload_cmd, secrets):
+    if not reload_cmd.strip():
+        print("[ERR] empty --reload-cmd")
+        sys.exit(2)
+    try:
+        ensure_parent_dirs([cert_dst, key_dst])
+    except OSError as e:
+        print(f"[ERR] failed to prepare certificate directory: {e}")
+        sys.exit(5)
+
+    cmd = [
+        acme_sh,
+        "--install-cert",
+        "-d",
+        primary_domain,
+        "--ecc",
+        "--fullchain-file",
+        cert_dst,
+        "--key-file",
+        key_dst,
+        "--reloadcmd",
+        reload_cmd,
+    ]
+    code, out = run(cmd, timeout=120)
+    print(redact_text(out, secrets))
+    if code != 0:
+        print("[ERR] failed to install certificate via acme.sh")
+        sys.exit(5)
+    print(f"[OK] installed to {cert_dst}, {key_dst}")
+
+
+def available_langs():
+    if not os.path.isdir(_I18N_DIR):
+        return ["en"]
+    langs = sorted([f[:-5] for f in os.listdir(_I18N_DIR) if f.endswith(".json")])
+    return langs or ["en"]
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(description="Issue cert via acme.sh + ESA DNS TXT automation (supports wildcard)")
+    parser.add_argument("-d", "--domain", action="append", required=True, help="can repeat, e.g. -d example.com -d '*.example.com'")
+    parser.add_argument("--site-id", required=False, help="ESA site id (optional; auto-detect by domain if omitted)")
+    parser.add_argument("--ak", default=os.getenv("ALIYUN_AK"))
+    parser.add_argument("--sk", default=os.getenv("ALIYUN_SK"))
+    parser.add_argument(
+        "--sts-token",
+        default=os.getenv("ALIYUN_SECURITY_TOKEN") or os.getenv("SECURITY_TOKEN"),
+        help="optional STS security token; recommended for temporary credentials",
+    )
+    langs = available_langs()
+    default_lang = "en" if "en" in langs else langs[0]
+    parser.add_argument("--lang", default=default_lang, choices=langs, help="output language for security reminders (default: en)")
+    parser.add_argument("--auto-install-deps", dest="auto_install_deps", action="store_true", default=True)
+    parser.add_argument("--no-auto-install-deps", dest="auto_install_deps", action="store_false")
+    parser.add_argument("--ttl", default="60")
+    parser.add_argument("--dns-timeout", type=int, default=600)
+    parser.add_argument("--install-cert", dest="install_cert", action="store_true", default=True)
+    parser.add_argument("--no-install-cert", dest="install_cert", action="store_false")
+    parser.add_argument("--cert-path", default=None, help="target crt path")
+    parser.add_argument("--key-path", default=None, help="target key path")
+    parser.add_argument("--reload-cmd", default="systemctl reload nginx")
+    parser.add_argument("--ensure-a-record", action="append", default=[], help="ensure IPv4/IPv6 record, format: host=ip")
+    parser.add_argument("--confirm-overwrite", action="store_true", default=False, help="required to overwrite existing A/AAAA record value")
+    return parser
+
+
+def parse_args(argv=None):
+    return build_arg_parser().parse_args(argv)
+
+
+def validate_credentials(ak, sk):
+    if ak and sk:
+        return
+    print("[ERR] missing --ak/--sk (or env ALIYUN_AK/ALIYUN_SK)")
+    sys.exit(2)
+
+
+def resolve_domain_plan_or_exit(domains):
+    try:
+        return build_domain_plan(domains)
+    except ValueError as e:
+        print(f"[ERR] {e}")
         sys.exit(2)
 
-    sts_token = os.getenv("ALIYUN_SECURITY_TOKEN") or os.getenv("SECURITY_TOKEN")
-    print_security_reminders(bool(sts_token), lang=args.lang)
-    secrets = [args.ak, args.sk, sts_token]
 
-    # de-dup while preserving order
-    domains = list(dict.fromkeys(args.domain))
-    main_domain = pick_main_domain(domains)
-    issue_domains = [main_domain] + [d for d in domains if d != main_domain]
-
-    acme_sh = find_acme_sh()
-
+def resolve_site_context(ak, sk, site_id, base_domain, sts_token=None):
     global _REGION
-    base_domain = main_domain.lstrip("*.")
 
-    # Auto-detect region + site, or use explicit site-id
-    if args.site_id:
-        site_id = str(args.site_id)
-        # Still need to find the correct region — probe regions with GetSite
+    if site_id:
+        resolved_site_id = str(site_id)
         detected_region = None
         zone = base_domain
-        regions = _discover_esa_regions(AcsClient(args.ak, args.sk, _DEFAULT_SEED_REGION))
+        seed_client = make_acs_client(ak, sk, _DEFAULT_SEED_REGION, sts_token=sts_token)
+        regions = _discover_esa_regions(seed_client)
         for region in regions:
             try:
-                client_tmp = AcsClient(args.ak, args.sk, region)
-                site = esa_req(client_tmp, "GetSite", "POST", region=region, SiteId=site_id)
+                client_tmp = make_acs_client(ak, sk, region, sts_token=sts_token)
+                site = esa_req(client_tmp, "GetSite", "POST", region=region, SiteId=resolved_site_id)
                 zone = (site.get("SiteName") or base_domain)
                 detected_region = region
                 break
             except Exception:
                 continue
         if not detected_region:
-            print(f"[ERR] SiteId={site_id} not found in any known ESA region")
+            print(f"[ERR] SiteId={resolved_site_id} not found in any known ESA region")
             sys.exit(2)
         _REGION = detected_region
-        client = AcsClient(args.ak, args.sk, _REGION)
-        print(f"[OK] auto-detected region={_REGION} for SiteId={site_id} site={zone}")
-    else:
-        # Probe all regions to find the domain
-        client_probe = AcsClient(args.ak, args.sk, "cn-hangzhou")  # region for AcsClient doesn't matter for CommonRequest
-        detected_region, site_id, zone = auto_detect_region(client_probe, base_domain)
-        if not detected_region:
-            print(f"[ERR] No ESA site matched domain '{base_domain}' in any known region")
-            sys.exit(2)
-        _REGION = detected_region
-        client = AcsClient(args.ak, args.sk, _REGION)
-        print(f"[OK] auto-detected region={_REGION} SiteId={site_id} for site={zone}")
+        client = make_acs_client(ak, sk, _REGION, sts_token=sts_token)
+        print(f"[OK] auto-detected region={_REGION} for SiteId={resolved_site_id} site={zone}")
+        return client, resolved_site_id, zone
 
-    # optional: ensure A records before cert flow
-    for item in args.ensure_a_record:
+    client_probe = make_acs_client(ak, sk, _DEFAULT_SEED_REGION, sts_token=sts_token)
+    detected_region, resolved_site_id, zone = auto_detect_region(client_probe, base_domain)
+    if not detected_region:
+        print(f"[ERR] No ESA site matched domain '{base_domain}' in any known region")
+        sys.exit(2)
+    _REGION = detected_region
+    client = make_acs_client(ak, sk, _REGION, sts_token=sts_token)
+    print(f"[OK] auto-detected region={_REGION} SiteId={resolved_site_id} for site={zone}")
+    return client, resolved_site_id, zone
+
+
+def parse_ensure_a_records(items):
+    parsed = []
+    for item in items:
         if "=" not in item:
             print(f"[ERR] invalid --ensure-a-record format: {item}, expect host=ip")
             sys.exit(2)
@@ -422,22 +515,59 @@ def main():
         if not is_valid_ip(ip):
             print(f"[ERR] invalid IP in --ensure-a-record: {ip}")
             sys.exit(2)
-        ensure_a_record(client, site_id, zone, host, ip, dns_timeout=args.dns_timeout, confirm_overwrite=args.confirm_overwrite)
+        parsed.append((host, ip))
+    return parsed
 
-    # 1) get challenge token(s) via manual dns mode
-    issue_cmd = [
-        acme_sh,
-        "--issue",
-        "--dns",
-    ]
-    for d in issue_domains:
-        issue_cmd.extend(["-d", d])
-    issue_cmd.extend([
+
+def ensure_requested_records(client, site_id, zone, records, dns_timeout, confirm_overwrite):
+    for host, ip in records:
+        ensure_a_record(
+            client,
+            site_id,
+            zone,
+            host,
+            ip,
+            dns_timeout=dns_timeout,
+            confirm_overwrite=confirm_overwrite,
+        )
+
+
+def build_issue_command(acme_sh, issue_domains):
+    cmd = [acme_sh, "--issue", "--dns"]
+    for domain in issue_domains:
+        cmd.extend(["-d", domain])
+    cmd.extend([
         "--yes-I-know-dns-manual-mode-enough-go-ahead-please",
         "--keylength",
         "ec-256",
     ])
-    code, out = run(issue_cmd, timeout=args.dns_timeout + ACME_CMD_TIMEOUT_PADDING)
+    return cmd
+
+
+def build_renew_command(acme_sh, primary_domain):
+    return [
+        acme_sh,
+        "--renew",
+        "-d",
+        primary_domain,
+        "--yes-I-know-dns-manual-mode-enough-go-ahead-please",
+        "--keylength",
+        "ec-256",
+    ]
+
+
+def group_challenges(challenges):
+    grouped = {}
+    for challenge in challenges:
+        grouped.setdefault(challenge["fqdn"], [])
+        if challenge["token"] not in grouped[challenge["fqdn"]]:
+            grouped[challenge["fqdn"]].append(challenge["token"])
+    return grouped
+
+
+def request_challenges(acme_sh, issue_domains, dns_timeout, secrets):
+    issue_cmd = build_issue_command(acme_sh, issue_domains)
+    code, out = run(issue_cmd, timeout=dns_timeout + ACME_CMD_TIMEOUT_PADDING)
     challenges = parse_challenges(out)
     if not challenges:
         print(redact_text(out, secrets))
@@ -445,115 +575,116 @@ def main():
         sys.exit(3)
 
     print("[OK] challenges:")
-    for c in challenges:
-        print(f"  - {c['fqdn']} = {c['token']}")
+    for challenge in challenges:
+        print(f"  - {challenge['fqdn']} = {challenge['token']}")
+    return group_challenges(challenges)
 
-    # group by fqdn (apex + wildcard often share same fqdn but different token)
-    grouped = {}
-    for c in challenges:
-        grouped.setdefault(c["fqdn"], [])
-        if c["token"] not in grouped[c["fqdn"]]:
-            grouped[c["fqdn"]].append(c["token"])
 
+def create_txt_records(client, site_id, grouped, ttl):
+    record_ids = []
+    for fqdn, tokens in grouped.items():
+        for token in tokens:
+            rec = esa_req(
+                client,
+                "CreateRecord",
+                "POST",
+                SiteId=site_id,
+                RecordName=fqdn,
+                Type="TXT",
+                Ttl=ttl,
+                Data=json.dumps({"Value": token}, separators=(",", ":")),
+                Proxied="false",
+            )
+            rid = rec.get("RecordId")
+            print(f"[INFO] ESA API accepted create request: {fqdn} token={token[:10]}... RecordId={rid}")
+
+            visible, confirmed_rid = wait_record_visible_in_esa(client, site_id, fqdn, token, timeout=120)
+            if not visible:
+                print(f"[ERR] ESA record not visible after create: {fqdn} token={token}")
+                print("[ERR] Do NOT claim DNS is ready. Please check ESA console/API permissions/filters.")
+                sys.exit(4)
+
+            record_ids.append(confirmed_rid or rid)
+            print(f"[OK] ESA TXT confirmed in ListRecords: {fqdn} RecordId={confirmed_rid or rid}")
+    return record_ids
+
+
+def wait_for_txt_records(zone, grouped, dns_timeout, secrets):
+    for fqdn, tokens in grouped.items():
+        for token in tokens:
+            ok, out = wait_dns_record(zone, fqdn, token, rrtype="TXT", timeout=dns_timeout)
+            if not ok:
+                print(redact_text(out, secrets))
+                print(f"[ERR] TXT not propagated: {fqdn} token={token}")
+                sys.exit(4)
+        print(f"[OK] authoritative TXT visible: {fqdn} ({len(tokens)} value(s))")
+
+
+def renew_certificate(acme_sh, primary_domain, dns_timeout, secrets):
+    renew_cmd = build_renew_command(acme_sh, primary_domain)
+    code, out = run(renew_cmd, timeout=dns_timeout + ACME_CMD_TIMEOUT_PADDING)
+    print(redact_text(out, secrets))
+    if code != 0:
+        print("[ERR] renew/sign failed")
+        sys.exit(5)
+
+
+def maybe_install_certificate(args, acme_sh, primary_domain, cert_basename, secrets):
+    if not args.install_cert:
+        return
+    cert_dst = args.cert_path or f"/etc/nginx/ssl/{cert_basename}.crt"
+    key_dst = args.key_path or f"/etc/nginx/ssl/{cert_basename}.key"
+    install_certificate(acme_sh, primary_domain, cert_dst, key_dst, args.reload_cmd, secrets)
+
+
+def cleanup_txt_records(client, site_id, record_ids):
+    for rid in record_ids:
+        if not rid:
+            continue
+        try:
+            esa_req(client, "DeleteRecord", "POST", SiteId=site_id, RecordId=rid)
+            print(f"[OK] cleaned TXT RecordId={rid}")
+        except Exception as e:
+            print(f"[WARN] cleanup failed RecordId={rid}: {e}")
+
+
+def run_certificate_flow(args, client, site_id, zone, acme_sh, domain_plan, secrets):
+    grouped = request_challenges(acme_sh, domain_plan["issue_domains"], args.dns_timeout, secrets)
     record_ids = []
     try:
-        # 2) create ESA TXT for each challenge token
-        for fqdn, tokens in grouped.items():
-            for token in tokens:
-                rec = esa_req(
-                    client,
-                    "CreateRecord",
-                    "POST",
-                    SiteId=site_id,
-                    RecordName=fqdn,
-                    Type="TXT",
-                    Ttl=args.ttl,
-                    Data=json.dumps({"Value": token}, separators=(",", ":")),
-                    Proxied="false",
-                )
-                rid = rec.get("RecordId")
-                print(f"[INFO] ESA API accepted create request: {fqdn} token={token[:10]}... RecordId={rid}")
-
-                visible, confirmed_rid = wait_record_visible_in_esa(client, site_id, fqdn, token, timeout=120)
-                if not visible:
-                    print(f"[ERR] ESA record not visible after create: {fqdn} token={token}")
-                    print("[ERR] Do NOT claim DNS is ready. Please check ESA console/API permissions/filters.")
-                    sys.exit(4)
-
-                record_ids.append(confirmed_rid or rid)
-                print(f"[OK] ESA TXT confirmed in ListRecords: {fqdn} RecordId={confirmed_rid or rid}")
-
-        # 3) wait propagation for each token on each fqdn
-        for fqdn, tokens in grouped.items():
-            for token in tokens:
-                ok, out = wait_txt(zone, fqdn, token, timeout=args.dns_timeout)
-                if not ok:
-                    print(redact_text(out, secrets))
-                    print(f"[ERR] TXT not propagated: {fqdn} token={token}")
-                    sys.exit(4)
-            print(f"[OK] authoritative TXT visible: {fqdn} ({len(tokens)} value(s))")
-
-        # 4) renew/sign (manual mode requires renew after issue)
-        renew_cmd = [
-            acme_sh,
-            "--renew",
-            "-d",
-            main_domain,
-            "--yes-I-know-dns-manual-mode-enough-go-ahead-please",
-            "--keylength",
-            "ec-256",
-        ]
-        code, out = run(renew_cmd, timeout=args.dns_timeout + ACME_CMD_TIMEOUT_PADDING)
-        print(redact_text(out, secrets))
-        if code != 0:
-            print("[ERR] renew/sign failed")
-            sys.exit(5)
-
-        # 5) optional install
-        if args.install_cert:
-            acme_home = os.path.dirname(os.path.abspath(acme_sh))
-            cert_src = os.path.join(acme_home, f"{main_domain}_ecc", "fullchain.cer")
-            key_src = os.path.join(acme_home, f"{main_domain}_ecc", f"{main_domain}.key")
-            cert_dst = args.cert_path or f"/etc/nginx/ssl/{main_domain}.crt"
-            key_dst = args.key_path or f"/etc/nginx/ssl/{main_domain}.key"
-            if not os.path.isfile(cert_src) or not os.path.isfile(key_src):
-                print(f"[ERR] expected cert/key not found: {cert_src}, {key_src}")
-                sys.exit(5)
-            code, out = run(["install", "-m", "600", key_src, key_dst], timeout=120)
-            if code != 0:
-                print(redact_text(out, secrets))
-                print("[ERR] failed to install private key")
-                sys.exit(5)
-            code, out = run(["install", "-m", "644", cert_src, cert_dst], timeout=120)
-            if code != 0:
-                print(redact_text(out, secrets))
-                print("[ERR] failed to install certificate")
-                sys.exit(5)
-            try:
-                reload_cmd = shlex.split(args.reload_cmd)
-            except ValueError as e:
-                print(f"[ERR] invalid --reload-cmd: {e}")
-                sys.exit(2)
-            if not reload_cmd:
-                print("[ERR] empty --reload-cmd")
-                sys.exit(2)
-            code, out = run(reload_cmd, timeout=120)
-            print(redact_text(out, secrets))
-            if code == 0:
-                print(f"[OK] installed to {cert_dst}, {key_dst}")
-            else:
-                print("[WARN] install done but reload failed")
-
+        record_ids = create_txt_records(client, site_id, grouped, args.ttl)
+        wait_for_txt_records(zone, grouped, args.dns_timeout, secrets)
+        renew_certificate(acme_sh, domain_plan["primary_domain"], args.dns_timeout, secrets)
+        maybe_install_certificate(args, acme_sh, domain_plan["primary_domain"], domain_plan["cert_basename"], secrets)
     finally:
-        # 6) cleanup TXT
-        for rid in record_ids:
-            if not rid:
-                continue
-            try:
-                esa_req(client, "DeleteRecord", "POST", SiteId=site_id, RecordId=rid)
-                print(f"[OK] cleaned TXT RecordId={rid}")
-            except Exception as e:
-                print(f"[WARN] cleanup failed RecordId={rid}: {e}")
+        cleanup_txt_records(client, site_id, record_ids)
+
+
+def main():
+    args = parse_args()
+    ensure_python_deps(auto_install=args.auto_install_deps)
+    validate_credentials(args.ak, args.sk)
+    print_security_reminders(bool(args.sts_token), lang=args.lang)
+    secrets = [args.ak, args.sk, args.sts_token]
+    domain_plan = resolve_domain_plan_or_exit(args.domain)
+    acme_sh = find_acme_sh()
+    client, site_id, zone = resolve_site_context(
+        args.ak,
+        args.sk,
+        args.site_id,
+        domain_plan["base_domain"],
+        sts_token=args.sts_token,
+    )
+    requested_records = parse_ensure_a_records(args.ensure_a_record)
+    ensure_requested_records(
+        client,
+        site_id,
+        zone,
+        requested_records,
+        dns_timeout=args.dns_timeout,
+        confirm_overwrite=args.confirm_overwrite,
+    )
+    run_certificate_flow(args, client, site_id, zone, acme_sh, domain_plan, secrets)
 
 
 if __name__ == "__main__":

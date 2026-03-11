@@ -38,7 +38,7 @@ acme.sh --set-default-ca --server letsencrypt
 脚本默认自动安装依赖。手动安装（可选）：
 
 ```bash
-python3 -m pip install --user aliyun-python-sdk-core aliyun-python-sdk-alidns
+python3 -m pip install --user aliyun-python-sdk-core
 ```
 
 ## 快速开始
@@ -48,6 +48,7 @@ python3 -m pip install --user aliyun-python-sdk-core aliyun-python-sdk-alidns
 ```bash
 export ALIYUN_AK='你的AK'
 export ALIYUN_SK='你的SK'
+export ALIYUN_SECURITY_TOKEN='YOUR_STS_TOKEN'  # 可选，推荐 STS 临时凭证
 ```
 
 ### 2) 单域名
@@ -62,11 +63,19 @@ python3 scripts/esa_acme_issue.py -d test.example.com --lang zh
 python3 scripts/esa_acme_issue.py -d example.com -d '*.example.com' --lang zh
 ```
 
+### 3.1) 仅通配符
+
+```bash
+python3 scripts/esa_acme_issue.py -d '*.example.com' --lang zh
+```
+
+脚本会保持“仅通配符”申请意图，不会再隐式补一个 `example.com`。
+
 ## 默认行为
 
 - 默认安装证书到 Nginx（`--no-install-cert` 关闭）
 - `--dns-timeout` 默认 `600`
-- 可选 A 记录管理：`--ensure-a-record host=ip`（含权威 NS 传播验证）
+- 可选 IPv4/IPv6 记录管理：`--ensure-a-record host=ip`（含权威 NS 传播验证）
 - 覆盖保护：除非提供 `--confirm-overwrite`，否则不会覆盖已有 A 记录值
 
 示例：

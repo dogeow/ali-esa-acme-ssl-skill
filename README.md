@@ -38,7 +38,7 @@ acme.sh --set-default-ca --server letsencrypt
 The script can auto-install dependencies by default. Manual install (optional):
 
 ```bash
-python3 -m pip install --user aliyun-python-sdk-core aliyun-python-sdk-alidns
+python3 -m pip install --user aliyun-python-sdk-core
 ```
 
 ## Quick start
@@ -48,6 +48,7 @@ python3 -m pip install --user aliyun-python-sdk-core aliyun-python-sdk-alidns
 ```bash
 export ALIYUN_AK='YOUR_AK'
 export ALIYUN_SK='YOUR_SK'
+export ALIYUN_SECURITY_TOKEN='YOUR_STS_TOKEN'  # optional but recommended
 ```
 
 ### 2) Single domain
@@ -62,6 +63,14 @@ python3 scripts/esa_acme_issue.py -d test.example.com
 python3 scripts/esa_acme_issue.py -d example.com -d '*.example.com'
 ```
 
+### 3.1) Wildcard only
+
+```bash
+python3 scripts/esa_acme_issue.py -d '*.example.com'
+```
+
+The script keeps wildcard-only requests as wildcard-only. It no longer adds `example.com` implicitly.
+
 ### 4) With Chinese output
 
 ```bash
@@ -72,7 +81,7 @@ python3 scripts/esa_acme_issue.py -d example.com --lang zh
 
 - Auto-install cert to Nginx by default (disable with `--no-install-cert`)
 - `--dns-timeout` default is `600`
-- Optional A record management: `--ensure-a-record host=ip` (with authoritative NS propagation verification)
+- Optional IPv4/IPv6 record management: `--ensure-a-record host=ip` (with authoritative NS propagation verification)
 - Overwrite protection: existing A value will NOT be overwritten unless `--confirm-overwrite` is provided
 
 Example:

@@ -47,12 +47,13 @@ acme.sh --set-default-ca --server letsencrypt
 Python dependencies (the script can auto-install; or install manually):
 
 ```bash
-python3 -m pip install --user aliyun-python-sdk-core aliyun-python-sdk-alidns
+python3 -m pip install --user aliyun-python-sdk-core
 ```
 
 Requirements:
 
 - AK/SK (recommended: pass via temporary environment variables)
+- STS token is supported via `ALIYUN_SECURITY_TOKEN` / `SECURITY_TOKEN` or `--sts-token`
 
 ---
 
@@ -64,7 +65,7 @@ Default behavior (optimized):
 
 - Auto-install cert and reload Nginx (disable with `--no-install-cert`)
 - `--dns-timeout` defaults to 600 seconds
-- Optional A record management: `--ensure-a-record host=ip` (with authoritative NS propagation check)
+- Optional IPv4/IPv6 record management: `--ensure-a-record host=ip` (with authoritative NS propagation check)
 - Overwrite protection: existing A value is NOT overwritten unless `--confirm-overwrite` is passed
 - `--lang` selects output language (default: `en`; available languages auto-discovered from `scripts/i18n/`)
 
@@ -73,6 +74,7 @@ Default behavior (optimized):
 ```bash
 export ALIYUN_AK='YOUR_AK'
 export ALIYUN_SK='YOUR_SK'
+export ALIYUN_SECURITY_TOKEN='YOUR_STS_TOKEN'   # optional but recommended
 python3 scripts/esa_acme_issue.py \
   -d test.example.com
 ```
@@ -84,6 +86,13 @@ export ALIYUN_AK='YOUR_AK'
 export ALIYUN_SK='YOUR_SK'
 python3 scripts/esa_acme_issue.py \
   -d example.com \
+  -d '*.example.com'
+```
+
+### Wildcard only
+
+```bash
+python3 scripts/esa_acme_issue.py \
   -d '*.example.com'
 ```
 
