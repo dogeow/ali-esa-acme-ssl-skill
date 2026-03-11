@@ -295,27 +295,14 @@ def auto_site_id(client, base_domain):
     return str(match.get("SiteId")), match.get("SiteName")
 
 
-def ensure_python_deps(auto_install=True):
+def ensure_python_deps():
     needed = ["aliyunsdkcore"]
     missing = [m for m in needed if importlib.util.find_spec(m) is None]
     if not missing:
         return
-    if not auto_install:
-        print("[ERR] missing python deps: aliyun-python-sdk-core")
-        sys.exit(2)
-    print("[INFO] installing python deps...")
-    code, out = run([
-        "python3",
-        "-m",
-        "pip",
-        "install",
-        "--user",
-        "aliyun-python-sdk-core",
-    ], timeout=600)
-    print(redact_text(out))
-    if code != 0:
-        print("[ERR] failed to auto-install python deps")
-        sys.exit(2)
+    print("[ERR] missing python deps: aliyun-python-sdk-core")
+    print("[ERR] install it manually first: python3 -m pip install --user aliyun-python-sdk-core")
+    sys.exit(2)
 
 
 def find_acme_sh():
@@ -430,11 +417,9 @@ def build_arg_parser():
     langs = available_langs()
     default_lang = "en" if "en" in langs else langs[0]
     parser.add_argument("--lang", default=default_lang, choices=langs, help="output language for security reminders (default: en)")
-    parser.add_argument("--auto-install-deps", dest="auto_install_deps", action="store_true", default=True)
-    parser.add_argument("--no-auto-install-deps", dest="auto_install_deps", action="store_false")
     parser.add_argument("--ttl", default="60")
     parser.add_argument("--dns-timeout", type=int, default=600)
-    parser.add_argument("--install-cert", dest="install_cert", action="store_true", default=True)
+    parser.add_argument("--install-cert", dest="install_cert", action="store_true", default=False)
     parser.add_argument("--no-install-cert", dest="install_cert", action="store_false")
     parser.add_argument("--cert-path", default=None, help="target crt path")
     parser.add_argument("--key-path", default=None, help="target key path")
@@ -662,7 +647,7 @@ def run_certificate_flow(args, client, site_id, zone, acme_sh, domain_plan, secr
 
 def main():
     args = parse_args()
-    ensure_python_deps(auto_install=args.auto_install_deps)
+    ensure_python_deps()
     validate_credentials(args.ak, args.sk)
     print_security_reminders(bool(args.sts_token), lang=args.lang)
     secrets = [args.ak, args.sk, args.sts_token]

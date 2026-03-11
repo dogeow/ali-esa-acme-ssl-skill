@@ -91,6 +91,16 @@ class CommandBuildTests(unittest.TestCase):
         )
 
 
+class ArgParseTests(unittest.TestCase):
+    def test_install_cert_is_opt_in(self):
+        args = MODULE.parse_args(["-d", "example.com"])
+        self.assertFalse(args.install_cert)
+
+    def test_install_cert_flag_enables_installation(self):
+        args = MODULE.parse_args(["-d", "example.com", "--install-cert"])
+        self.assertTrue(args.install_cert)
+
+
 class CommandTests(unittest.TestCase):
     def test_run_returns_not_found_for_missing_command(self):
         code, out = MODULE.run(["definitely-not-a-command-123"])

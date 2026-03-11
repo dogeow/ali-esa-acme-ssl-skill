@@ -2,7 +2,7 @@
 
 [Chinese Documentation](README_zh.md)
 
-OpenClaw skill for **automatic HTTPS certificate issuance/renewal** using **Alibaba Cloud ESA DNS + acme.sh**, with optional automatic installation to Nginx.
+OpenClaw skill for **automatic HTTPS certificate issuance/renewal** using **Alibaba Cloud ESA DNS + acme.sh**, with optional installation to Nginx.
 
 ## What this skill solves
 
@@ -24,18 +24,17 @@ In other words, when a domain is hosted on ESA (`*.atrustdns.com`), DNS-01 valid
 - `scripts/i18n/` – Language files (en.json, zh.json, …) for script output
 - `evals/evals.json` – Basic evaluation prompts
 
-## First-time acme.sh setup
+## acme.sh prerequisite
 
-```bash
-curl https://get.acme.sh | sh
-source ~/.bashrc
-acme.sh --register-account -m example@example.com
-acme.sh --set-default-ca --server letsencrypt
-```
+Install `acme.sh` from the official project before using this skill, and review the installation method you choose instead of piping remote scripts directly to a shell:
+
+- https://github.com/acmesh-official/acme.sh
+
+This skill expects `acme.sh` to already exist at `~/.acme.sh/acme.sh` or be available on `PATH`.
 
 ## Python dependencies
 
-The script can auto-install dependencies by default. Manual install (optional):
+The script does not auto-install dependencies. Install them manually first:
 
 ```bash
 python3 -m pip install --user aliyun-python-sdk-core
@@ -79,10 +78,11 @@ python3 scripts/esa_acme_issue.py -d example.com --lang zh
 
 ## Defaults
 
-- Auto-install cert to Nginx by default (disable with `--no-install-cert`)
+- Certificate installation to Nginx is disabled by default; opt in with `--install-cert`
 - `--dns-timeout` default is `600`
 - Optional IPv4/IPv6 record management: `--ensure-a-record host=ip` (with authoritative NS propagation verification)
 - Overwrite protection: existing A value will NOT be overwritten unless `--confirm-overwrite` is provided
+- If you use `--install-cert`, run on a controlled Linux host with permission to write target cert paths and reload Nginx
 
 Example:
 
@@ -90,6 +90,14 @@ Example:
 python3 scripts/esa_acme_issue.py \
   -d test.example.com \
   --ensure-a-record test.example.com=1.2.3.4
+```
+
+Install to Nginx explicitly:
+
+```bash
+python3 scripts/esa_acme_issue.py \
+  -d test.example.com \
+  --install-cert
 ```
 
 ## Completion criteria (anti false-positive)

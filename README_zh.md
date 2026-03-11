@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-OpenClaw 技能：使用 **阿里云 ESA DNS + acme.sh** 自动申请/续期 HTTPS 证书，支持泛域名，可自动安装到 Nginx。
+OpenClaw 技能：使用 **阿里云 ESA DNS + acme.sh** 自动申请/续期 HTTPS 证书，支持泛域名，可按需安装到 Nginx。
 
 ## 解决什么问题
 
@@ -24,18 +24,17 @@ AI 模型总是解析到错误的地方，它到传统的云解析 DNS 那边解
 - `scripts/i18n/` – 脚本输出的语言文件（en.json、zh.json 等）
 - `evals/evals.json` – 基础评估用例
 
-## 首次安装 acme.sh
+## acme.sh 前置要求
 
-```bash
-curl https://get.acme.sh | sh
-source ~/.bashrc
-acme.sh --register-account -m example@example.com
-acme.sh --set-default-ca --server letsencrypt
-```
+使用本技能前，请先按 `acme.sh` 官方项目的说明完成安装，并先审查你选择的安装方式，不要直接把远程脚本无审查地管道给 shell：
+
+- https://github.com/acmesh-official/acme.sh
+
+本技能要求 `acme.sh` 已经存在于 `~/.acme.sh/acme.sh`，或者可以从 `PATH` 找到。
 
 ## Python 依赖
 
-脚本默认自动安装依赖。手动安装（可选）：
+脚本不会自动安装依赖，请先手动安装：
 
 ```bash
 python3 -m pip install --user aliyun-python-sdk-core
@@ -73,10 +72,11 @@ python3 scripts/esa_acme_issue.py -d '*.example.com' --lang zh
 
 ## 默认行为
 
-- 默认安装证书到 Nginx（`--no-install-cert` 关闭）
+- 默认不安装证书到 Nginx；如需安装请显式传 `--install-cert`
 - `--dns-timeout` 默认 `600`
 - 可选 IPv4/IPv6 记录管理：`--ensure-a-record host=ip`（含权威 NS 传播验证）
 - 覆盖保护：除非提供 `--confirm-overwrite`，否则不会覆盖已有 A 记录值
+- 如果使用 `--install-cert`，请在可控 Linux 主机上执行，并确保当前用户有权限写入目标证书路径并重载 Nginx
 
 示例：
 
@@ -84,6 +84,15 @@ python3 scripts/esa_acme_issue.py -d '*.example.com' --lang zh
 python3 scripts/esa_acme_issue.py \
   -d test.example.com \
   --ensure-a-record test.example.com=1.2.3.4 \
+  --lang zh
+```
+
+显式安装到 Nginx：
+
+```bash
+python3 scripts/esa_acme_issue.py \
+  -d test.example.com \
+  --install-cert \
   --lang zh
 ```
 

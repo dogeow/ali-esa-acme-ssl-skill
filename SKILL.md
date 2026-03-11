@@ -1,6 +1,8 @@
 ---
 name: ali-esa-acme-ssl-skill
-description: Automatically issue/renew HTTPS certificates using Alibaba Cloud ESA DNS + acme.sh (including wildcard *.example.com + example.com), with optional auto-install to Nginx. Trigger this skill when the user mentions ESA, ATrustDNS, _acme-challenge, acme.sh, Let's Encrypt, No TXT record found, InvalidRecordNameSuffix, wildcard certificate, or Nginx certificate configuration.
+description: Automatically issue/renew HTTPS certificates using Alibaba Cloud ESA DNS + acme.sh (including wildcard *.example.com + example.com), with optional installation to Nginx. Trigger this skill when the user mentions ESA, ATrustDNS, _acme-challenge, acme.sh, Let's Encrypt, No TXT record found, InvalidRecordNameSuffix, wildcard certificate, or Nginx certificate configuration.
+homepage: https://github.com/dogeow/ali-esa-acme-ssl-skill
+metadata: {"openclaw":{"homepage":"https://github.com/dogeow/ali-esa-acme-ssl-skill","os":["linux"],"requires":{"bins":["python3","dig"],"env":["ALIYUN_AK","ALIYUN_SK"]},"primaryEnv":"ALIYUN_AK"}}
 ---
 
 # ESA DNS + ACME Certificate Automation
@@ -36,15 +38,13 @@ Trigger when any of the following apply:
 
 ## Prerequisites
 
-First-time setup:
-```bash
-curl https://get.acme.sh | sh
-source ~/.bashrc
-acme.sh --register-account -m example@example.com
-acme.sh --set-default-ca --server letsencrypt
-```
+Install `acme.sh` from the official project before using this skill, and review the installation method you choose instead of piping remote scripts directly to a shell:
 
-Python dependencies (the script can auto-install; or install manually):
+- https://github.com/acmesh-official/acme.sh
+
+This skill expects `acme.sh` to already exist at `~/.acme.sh/acme.sh` or be available on `PATH`.
+
+Python dependencies (manual install required):
 
 ```bash
 python3 -m pip install --user aliyun-python-sdk-core
@@ -63,11 +63,12 @@ Script path: `scripts/esa_acme_issue.py`
 
 Default behavior (optimized):
 
-- Auto-install cert and reload Nginx (disable with `--no-install-cert`)
+- Certificate installation to Nginx is disabled by default; opt in with `--install-cert`
 - `--dns-timeout` defaults to 600 seconds
 - Optional IPv4/IPv6 record management: `--ensure-a-record host=ip` (with authoritative NS propagation check)
 - Overwrite protection: existing A value is NOT overwritten unless `--confirm-overwrite` is passed
 - `--lang` selects output language (default: `en`; available languages auto-discovered from `scripts/i18n/`)
+- If `--install-cert` is used, run on a controlled Linux host with permission to write the target cert paths and reload Nginx
 
 ### Single domain
 

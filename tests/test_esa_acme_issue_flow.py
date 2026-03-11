@@ -98,7 +98,7 @@ class FlowTests(unittest.TestCase):
              patch.object(MODULE, "esa_req", side_effect=fake_esa_req), \
              patch.object(MODULE, "wait_record_visible_in_esa", side_effect=fake_wait_visible), \
              patch.object(MODULE, "wait_dns_record", return_value=(True, "visible")) as wait_dns_mock, \
-             patch("sys.argv", ["esa_acme_issue.py", "-d", "example.com", "-d", "*.example.com", "--ak", "ak", "--sk", "sk", "--sts-token", "sts"]), \
+             patch("sys.argv", ["esa_acme_issue.py", "-d", "example.com", "-d", "*.example.com", "--ak", "ak", "--sk", "sk", "--sts-token", "sts", "--install-cert"]), \
              contextlib.redirect_stdout(stdout):
             MODULE.main()
 
