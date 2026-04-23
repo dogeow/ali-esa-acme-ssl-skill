@@ -67,6 +67,31 @@ Default behavior (optimized):
 - `--lang` selects output language (default: `en`; available languages auto-discovered from `scripts/i18n/`)
 - If `--install-cert` is used, run on a controlled Linux host with permission to write the target cert paths and reload Nginx
 
+## Installing automatic renewal cron
+
+Use `scripts/install_cron.sh` when the user wants this workflow to keep renewing automatically on the host.
+
+What it installs:
+- a root-owned env file containing AK/SK (and optional STS token / region hint)
+- a wrapper script under `/usr/local/sbin/`
+- a cron entry that runs the wrapper on the requested schedule and logs to `/var/log/`
+
+Example:
+
+```bash
+sudo bash scripts/install_cron.sh \
+  --wrapper-name dogeow \
+  --domains "dogeow.com,*.dogeow.com" \
+  --ak YOUR_AK \
+  --sk YOUR_SK \
+  --region cn-hangzhou \
+  --with-nginx-reload
+```
+
+Important:
+- This is the recommended way to automate renewal for ESA zones, because default `acme.sh --cron` does not know how to create ESA DNS TXT records by itself.
+- If the user wants installed nginx cert paths, also pass `--cert-path` / `--key-path` and optionally `--reload-cmd`.
+
 ### Single domain
 
 ```bash

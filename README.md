@@ -85,6 +85,39 @@ python3 scripts/esa_acme_issue.py -d example.com --lang zh
 
 - If you use `--install-cert`, run on a controlled Linux host with permission to write target cert paths and reload Nginx
 
+## Install automatic renewal cron
+
+Use `scripts/install_cron.sh` to install a root-owned env file, wrapper script, and cron entry.
+
+Example:
+
+```bash
+sudo bash scripts/install_cron.sh \
+  --wrapper-name dogeow \
+  --domains "dogeow.com,*.dogeow.com" \
+  --ak YOUR_AK \
+  --sk YOUR_SK \
+  --region cn-hangzhou \
+  --with-nginx-reload
+```
+
+What it creates:
+- env file under `/root/.config/`
+- wrapper under `/usr/local/sbin/`
+- cron entry that writes logs to `/var/log/`
+
+You can customize the schedule with `--schedule`, for example:
+
+```bash
+sudo bash scripts/install_cron.sh \
+  --domains "example.com,*.example.com" \
+  --ak YOUR_AK \
+  --sk YOUR_SK \
+  --schedule "17 3 * * 0"
+```
+
+If you want acme.sh to install the renewed certificate into nginx-managed paths, pass `--cert-path`, `--key-path`, and optionally `--reload-cmd`.
+
 Example:
 
 ```bash

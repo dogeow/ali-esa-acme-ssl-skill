@@ -79,6 +79,39 @@ python3 scripts/esa_acme_issue.py -d '*.example.com' --lang zh
 
 - 如果使用 `--install-cert`，请在可控 Linux 主机上执行，并确保当前用户有权限写入目标证书路径并重载 Nginx
 
+## 安装自动续期 cron
+
+使用 `scripts/install_cron.sh` 可以一键安装 root 持有的环境文件、wrapper 脚本和 cron 任务。
+
+示例：
+
+```bash
+sudo bash scripts/install_cron.sh \
+  --wrapper-name dogeow \
+  --domains "dogeow.com,*.dogeow.com" \
+  --ak 你的AK \
+  --sk 你的SK \
+  --region cn-hangzhou \
+  --with-nginx-reload
+```
+
+它会创建：
+- `/root/.config/` 下的 env 文件
+- `/usr/local/sbin/` 下的 wrapper 脚本
+- 写日志到 `/var/log/` 的 cron 任务
+
+你也可以通过 `--schedule` 自定义 cron 表达式，例如：
+
+```bash
+sudo bash scripts/install_cron.sh \
+  --domains "example.com,*.example.com" \
+  --ak 你的AK \
+  --sk 你的SK \
+  --schedule "17 3 * * 0"
+```
+
+如果希望续期后由 acme.sh 安装证书到 nginx 管理路径，请传 `--cert-path`、`--key-path`，以及可选的 `--reload-cmd`。
+
 示例：
 
 ```bash
