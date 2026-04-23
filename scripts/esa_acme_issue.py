@@ -22,9 +22,11 @@ import uuid
 DEFAULT_CMD_TIMEOUT = 300
 DIG_CMD_TIMEOUT = 20
 ACME_CMD_TIMEOUT_PADDING = 900
+ESA_REQ_MAX_ATTEMPTS = 3
 AK_ENV_NAMES = ("ALIYUN_AK", "ALIBABACLOUD_ACCESS_KEY_ID")
 SK_ENV_NAMES = ("ALIYUN_SK", "ALIBABACLOUD_ACCESS_KEY_SECRET")
 STS_ENV_NAMES = ("ALIYUN_SECURITY_TOKEN", "ALIBABACLOUD_SECURITY_TOKEN")
+ESA_REGION_ENV_NAMES = ("ALIYUN_ESA_REGION", "ALIBABACLOUD_ESA_REGION", "ESA_REGION")
 
 
 def run(cmd, timeout=DEFAULT_CMD_TIMEOUT):
@@ -153,6 +155,13 @@ def query_authoritative_records(zone, name, rrtype):
 ESA_API_VERSION = "2024-09-10"
 _REGION = None  # must be auto-detected before use
 _DEFAULT_SEED_REGION = "cn-hangzhou"
+_FALLBACK_ESA_REGIONS = (
+    "cn-hangzhou",
+    "ap-southeast-1",
+    "ap-southeast-7",
+    "us-west-1",
+    "eu-central-1",
+)
 
 
 def _percent_encode(value):
@@ -167,20 +176,49 @@ def _iso8601_timestamp():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _discover_esa_regions(client):
-    """Dynamically discover all ESA-supported regions via DescribeRegions API."""
+def _discover_esa_regions(client, preferred_region=None):
+    """Best-effort ESA region discovery with sane fallbacks.
+
+    ESA deployments do not always expose DescribeRegions. When that action is
+    unavailable, fall back to a curated candidate list plus any explicit region
+    hint so callers can still auto-detect the site.
+    """
+    candidates = []
+    for region in [preferred_region, client.get("region"), _DEFAULT_SEED_REGION, *_FALLBACK_ESA_REGIONS]:
+        if region and region not in candidates:
+            candidates.append(region)
     try:
-        resp = esa_req(client, "DescribeRegions", "GET", region=_DEFAULT_SEED_REGION)
+        resp = esa_req(client, "DescribeRegions", "GET", region=preferred_region or client.get("region") or _DEFAULT_SEED_REGION)
         regions = resp.get("Regions", [])
         discovered = [r["RegionId"] for r in regions if r.get("RegionId")]
+        for region in discovered:
+            if region not in candidates:
+                candidates.append(region)
         if discovered:
-            return discovered
-        print(f"[WARN] DescribeRegions returned no region list, fallback to {_DEFAULT_SEED_REGION}.")
-        return [_DEFAULT_SEED_REGION]
+            return candidates
+        print(f"[WARN] DescribeRegions returned no region list, fallback to candidates: {', '.join(candidates)}.")
+        return candidates
     except Exception as e:
-        # Fallback: if DescribeRegions not available, use seed region only
-        print(f"[WARN] DescribeRegions failed: {e}. Fallback to {_DEFAULT_SEED_REGION}.")
-        return [_DEFAULT_SEED_REGION]
+        # DescribeRegions is not consistently available on ESA. Continue with
+        # explicit and curated candidates instead of aborting early.
+        print(f"[WARN] DescribeRegions failed: {e}. Fallback to candidates: {', '.join(candidates)}.")
+        return candidates
+
+
+def _is_retryable_esa_error(exc):
+    text = str(exc).lower()
+    retry_markers = (
+        "connection reset",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "remote end closed connection",
+        "connection refused",
+        "bad gateway",
+        "service unavailable",
+        "internal server error",
+    )
+    return any(marker in text for marker in retry_markers)
 
 
 def esa_req(client, action, method="POST", region=None, **params):
@@ -219,22 +257,38 @@ def esa_req(client, action, method="POST", region=None, **params):
     data = None if method.upper() == "GET" else payload
     if method.upper() == "GET":
         url = f"{url}?{payload.decode('utf-8')}"
-    req = urllib.request.Request(url, data=data, method=method.upper())
-    req.add_header("Accept", "application/json")
-    if data is not None:
-        req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            body = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"ESA API HTTP {e.code}: {body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"ESA API request failed: {e}") from e
-    try:
-        return json.loads(body)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"ESA API returned non-JSON response: {body}") from e
+
+    last_error = None
+    for attempt in range(1, ESA_REQ_MAX_ATTEMPTS + 1):
+        req = urllib.request.Request(url, data=data, method=method.upper())
+        req.add_header("Accept", "application/json")
+        if data is not None:
+            req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                body = resp.read().decode("utf-8")
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"ESA API returned non-JSON response: {body}") from e
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            error = RuntimeError(f"ESA API HTTP {e.code}: {body}")
+            if attempt < ESA_REQ_MAX_ATTEMPTS and (e.code >= 500 or _is_retryable_esa_error(error)):
+                time.sleep(attempt)
+                last_error = error
+                continue
+            raise error from e
+        except (urllib.error.URLError, ConnectionResetError, TimeoutError, OSError) as e:
+            error = RuntimeError(f"ESA API request failed: {e}")
+            if attempt < ESA_REQ_MAX_ATTEMPTS and _is_retryable_esa_error(error):
+                time.sleep(attempt)
+                last_error = error
+                continue
+            raise error from e
+    if last_error:
+        raise last_error
+    raise RuntimeError("ESA API request failed for an unknown reason")
 
 
 def parse_challenges(output):
@@ -337,9 +391,9 @@ def _match_site(sites, base_domain):
     return candidates[0]
 
 
-def auto_detect_region(client, base_domain):
+def auto_detect_region(client, base_domain, preferred_region=None):
     """Probe ESA regions to find which one hosts the target domain."""
-    regions = _discover_esa_regions(client)
+    regions = _discover_esa_regions(client, preferred_region=preferred_region)
     print(f"[INFO] discovered {len(regions)} ESA region(s): {', '.join(regions)}")
     for region in regions:
         try:
@@ -460,6 +514,7 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description="Issue cert via acme.sh + ESA DNS TXT automation (supports wildcard)")
     parser.add_argument("-d", "--domain", action="append", required=True, help="can repeat, e.g. -d example.com -d '*.example.com'")
     parser.add_argument("--site-id", required=False, help="ESA site id (optional; auto-detect by domain if omitted)")
+    parser.add_argument("--region", default=first_env(*ESA_REGION_ENV_NAMES), help="ESA region hint, e.g. cn-hangzhou")
     parser.add_argument("--ak", default=first_env(*AK_ENV_NAMES))
     parser.add_argument("--sk", default=first_env(*SK_ENV_NAMES))
     parser.add_argument(
@@ -502,15 +557,17 @@ def resolve_domain_plan_or_exit(domains):
         sys.exit(2)
 
 
-def resolve_site_context(ak, sk, site_id, base_domain, sts_token=None):
+def resolve_site_context(ak, sk, site_id, base_domain, sts_token=None, region=None):
     global _REGION
+
+    preferred_region = region or _DEFAULT_SEED_REGION
 
     if site_id:
         resolved_site_id = str(site_id)
         detected_region = None
         zone = base_domain
-        seed_client = make_acs_client(ak, sk, _DEFAULT_SEED_REGION, sts_token=sts_token)
-        regions = _discover_esa_regions(seed_client)
+        seed_client = make_acs_client(ak, sk, preferred_region, sts_token=sts_token)
+        regions = _discover_esa_regions(seed_client, preferred_region=region)
         for region in regions:
             try:
                 client_tmp = make_acs_client(ak, sk, region, sts_token=sts_token)
@@ -528,8 +585,8 @@ def resolve_site_context(ak, sk, site_id, base_domain, sts_token=None):
         print(f"[OK] auto-detected region={_REGION} for SiteId={resolved_site_id} site={zone}")
         return client, resolved_site_id, zone
 
-    client_probe = make_acs_client(ak, sk, _DEFAULT_SEED_REGION, sts_token=sts_token)
-    detected_region, resolved_site_id, zone = auto_detect_region(client_probe, base_domain)
+    client_probe = make_acs_client(ak, sk, preferred_region, sts_token=sts_token)
+    detected_region, resolved_site_id, zone = auto_detect_region(client_probe, base_domain, preferred_region=region)
     if not detected_region:
         print(f"[ERR] No ESA site matched domain '{base_domain}' in any known region")
         sys.exit(2)
@@ -589,6 +646,7 @@ def build_renew_command(acme_sh, primary_domain):
         "--renew",
         "-d",
         primary_domain,
+        "--ecc",
         "--yes-I-know-dns-manual-mode-enough-go-ahead-please",
         "--keylength",
         "ec-256",
@@ -713,6 +771,7 @@ def main():
         args.site_id,
         domain_plan["base_domain"],
         sts_token=args.sts_token,
+        region=args.region,
     )
     requested_records = parse_ensure_a_records(args.ensure_a_record)
     ensure_requested_records(

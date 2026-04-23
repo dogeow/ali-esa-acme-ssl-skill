@@ -47,6 +47,7 @@ This skill expects `acme.sh` to be available on `PATH`. The script also falls ba
 Requirements:
 
 - Credentials via `ALIYUN_AK` / `ALIYUN_SK` or `ALIBABACLOUD_ACCESS_KEY_ID` / `ALIBABACLOUD_ACCESS_KEY_SECRET`
+- Optional ESA region hint via `ALIYUN_ESA_REGION` / `ALIBABACLOUD_ESA_REGION` / `ESA_REGION` or `--region`
 - STS token is supported via `ALIYUN_SECURITY_TOKEN`, `ALIBABACLOUD_SECURITY_TOKEN`, or `--sts-token`
 - If the user provides credentials directly in OpenClaw chat/TUI as plain `id` / `secret` / `token` values without env names, treat them as generic Alibaba Cloud `AccessKeyId` / `AccessKeySecret` / `SecurityToken` and pass them to `--ak` / `--sk` / `--sts-token`. Do not block on whether the user said `Aliyun` or `Alibaba Cloud`; let the script auto-detect the ESA region/site.
 
@@ -60,6 +61,7 @@ Default behavior (optimized):
 
 - Certificate installation to Nginx is disabled by default; opt in with `--install-cert`
 - `--dns-timeout` defaults to 600 seconds
+- Region auto-discovery is best-effort; if ESA does not expose `DescribeRegions`, pass `--region` to seed site discovery and the script will probe a fallback region list
 - Optional IPv4/IPv6 record management: `--ensure-a-record host=ip` (with authoritative NS propagation check)
 - Overwrite protection: existing A value is NOT overwritten unless `--confirm-overwrite` is passed
 - `--lang` selects output language (default: `en`; available languages auto-discovered from `scripts/i18n/`)

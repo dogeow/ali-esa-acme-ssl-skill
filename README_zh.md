@@ -73,9 +73,10 @@ python3 scripts/esa_acme_issue.py -d '*.example.com' --lang zh
 ## 默认行为
 
 - 默认不安装证书到 Nginx；如需安装请显式传 `--install-cert`
-- `--dns-timeout` 默认 `600`
-- 可选 IPv4/IPv6 记录管理：`--ensure-a-record host=ip`（含权威 NS 传播验证）
-- 覆盖保护：除非提供 `--confirm-overwrite`，否则不会覆盖已有 A 记录值
+- `--dns-timeout` 默认 600 秒
+- 区域自动发现为尽力而为；如果 ESA 不支持 `DescribeRegions`，请传 `--region` 作为站点探测提示，脚本会继续探测内置候选区域
+- 可选 IPv4/IPv6 记录管理：`--ensure-a-record host=ip`（会校验权威 NS 生效）
+
 - 如果使用 `--install-cert`，请在可控 Linux 主机上执行，并确保当前用户有权限写入目标证书路径并重载 Nginx
 
 示例：
