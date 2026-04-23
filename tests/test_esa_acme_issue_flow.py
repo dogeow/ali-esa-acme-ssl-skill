@@ -50,6 +50,28 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(calls["count"], 2)
 
+    def test_main_skips_cleanly_when_cert_not_due_for_renewal(self):
+        skip_output = """
+[Thu Apr 23 19:05:43 UTC 2026] Domains not changed.
+[Thu Apr 23 19:05:43 UTC 2026] Skip, Next renewal time is: Mon Jun 22 18:23:50 UTC 2026
+[Thu Apr 23 19:05:43 UTC 2026] Add '--force' to force to renew.
+"""
+        stdout = io.StringIO()
+        with patch.object(MODULE, "ensure_python_deps"), \
+             patch.object(MODULE, "find_acme_sh", return_value="/mock/acme.sh"), \
+             patch.object(MODULE, "print_security_reminders"), \
+             patch.object(MODULE, "make_acs_client", side_effect=["probe-client", "active-client"]), \
+             patch.object(MODULE, "auto_detect_region", return_value=("cn-hangzhou", "site-1", "example.com")), \
+             patch.object(MODULE, "run", return_value=(0, skip_output)) as run_mock, \
+             patch.object(MODULE, "esa_req") as esa_req_mock, \
+             patch("sys.argv", ["esa_acme_issue.py", "-d", "example.com", "--ak", "ak", "--sk", "sk"]), \
+             contextlib.redirect_stdout(stdout):
+            MODULE.main()
+
+        self.assertEqual(run_mock.call_count, 1)
+        esa_req_mock.assert_not_called()
+        self.assertIn("[OK] certificate is not due for renewal yet; skipping issuance flow", stdout.getvalue())
+
     def test_main_success_runs_full_dns_and_install_flow(self):
         created = []
         deleted = []

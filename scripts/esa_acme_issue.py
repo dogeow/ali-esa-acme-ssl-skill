@@ -667,7 +667,16 @@ def request_challenges(acme_sh, issue_domains, dns_timeout, secrets):
     code, out = run(issue_cmd, timeout=dns_timeout + ACME_CMD_TIMEOUT_PADDING)
     challenges = parse_challenges(out)
     if not challenges:
-        print(redact_text(out, secrets))
+        masked = redact_text(out, secrets)
+        print(masked)
+        skip_markers = (
+            "skip, next renewal time is:",
+            "domains not changed.",
+            "add '--force' to force to renew.",
+        )
+        if all(marker in masked.lower() for marker in skip_markers):
+            print("[OK] certificate is not due for renewal yet; skipping issuance flow")
+            return None
         print("[ERR] failed to parse challenge tokens")
         sys.exit(3)
 
@@ -747,6 +756,8 @@ def cleanup_txt_records(client, site_id, record_ids):
 
 def run_certificate_flow(args, client, site_id, zone, acme_sh, domain_plan, secrets):
     grouped = request_challenges(acme_sh, domain_plan["issue_domains"], args.dns_timeout, secrets)
+    if grouped is None:
+        return
     record_ids = []
     try:
         record_ids = create_txt_records(client, site_id, grouped, args.ttl)
